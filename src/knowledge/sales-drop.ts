@@ -70,6 +70,11 @@ const SOURCES = {
 const pct = (now: number, before: number): number | null =>
   before === 0 ? null : Number((((now - before) / before) * 100).toFixed(1));
 
+// «2026-09-24» → «24.09». В живой фразе ISO-дата читается как машинный лог.
+const day = (iso: string) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+// Русская десятичная запятая: «15,4%», а не «15.4%».
+const num = (n: number | null) => (n === null ? "н/д" : String(n).replace(".", ","));
+
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const avg = (xs: number[]) => (xs.length ? sum(xs) / xs.length : 0);
 
@@ -141,13 +146,13 @@ function checkSales(cur: DailyPoint[], prev: DailyPoint[]): {
       status: fell ? "found" : "not_confirmed",
       data: `Заказы ${ordersBefore} → ${ordersNow} шт, выручка ${Math.round(
         revenueBefore
-      )} → ${Math.round(revenueNow)} ₽${startedOn ? `, падение с ${startedOn}` : ""}`,
+      )} → ${Math.round(revenueNow)} ₽${startedOn ? `, падение с ${day(startedOn)}` : ""}`,
       formula: "(текущий период − предыдущий) / предыдущий × 100",
       conclusion: fell
-        ? `Заказы ${ordersDelta}%, выручка ${revenueDelta}%.${
-            startedOn ? ` Падение началось ${startedOn}.` : ""
+        ? `Заказы ${num(ordersDelta)}%, выручка ${num(revenueDelta)}%.${
+            startedOn ? ` Падение началось ${day(startedOn)}.` : ""
           }`
-        : `Заказы ${ordersDelta}% — значимого падения нет.`,
+        : `Заказы ${num(ordersDelta)}% — значимого падения нет.`,
       source: SOURCES.sales,
       weight: 0, // это констатация факта, а не причина
       action: null,
@@ -166,11 +171,11 @@ function checkStock(cur: DailyPoint[]): CheckResult {
     title: "Остаток",
     status: found ? "found" : "not_confirmed",
     data: found
-      ? `Остаток 0 в ${zeroDays.length} из ${cur.length} дней, впервые ${zeroDays[0].date}`
+      ? `Остаток 0 в ${zeroDays.length} из ${cur.length} дней, впервые ${day(zeroDays[0].date)}`
       : `Минимальный остаток за период — ${Math.min(...cur.map((d) => d.stock))} шт`,
     formula: "дни с stock = 0 внутри периода",
     conclusion: found
-      ? `Товар выпал из продажи с ${zeroDays[0].date}. Это перебивает остальные причины: без остатка карточка не продаёт и теряет позиции.`
+      ? `Товар выпал из продажи ${day(zeroDays[0].date)}. Это перебивает остальные причины: без остатка карточка не продаёт и теряет позиции.`
       : "Товар был в наличии весь период — дефицит падение не объясняет.",
     source: SOURCES.stock,
     weight: found ? 100 + (zeroDays.length / cur.length) * 10 : 0,
@@ -193,11 +198,11 @@ function checkPrice(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
     order: 3,
     title: "Цена",
     status: raised ? "found" : "not_confirmed",
-    data: `Наша цена ${Math.round(priceBefore)} → ${Math.round(priceNow)} ₽ (${delta}%). Цены конкурентов: нет данных.`,
+    data: `Наша цена ${Math.round(priceBefore)} → ${Math.round(priceNow)} ₽ (${num(delta)}%). Цены конкурентов: нет данных.`,
     formula: "(средняя цена текущего периода − предыдущего) / предыдущего × 100",
     conclusion: raised
-      ? `Цену подняли на ${delta}% — это совпадает с падением спроса. Сравнить с рынком нельзя: MPSTATS не подключён, поэтому насколько цена выбилась из ниши — неизвестно.`
-      : `Наша цена практически не менялась (${delta}%). Сравнение с конкурентами недоступно — MPSTATS не подключён, поэтому эту половину проверки закрыть нечем.`,
+      ? `Цену подняли на ${num(delta)}% — это совпадает с падением спроса. Сравнить с рынком нельзя: MPSTATS не подключён, поэтому насколько цена выбилась из ниши — неизвестно.`
+      : `Наша цена практически не менялась (${num(delta)}%). Сравнение с конкурентами недоступно — MPSTATS не подключён, поэтому эту половину проверки закрыть нечем.`,
     source: `${SOURCES.price}; ${SOURCES.market}`,
     weight: raised ? 80 + Math.min(20, Math.abs(delta ?? 0)) : 0,
     action: raised
@@ -232,13 +237,13 @@ function checkPosition(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
     title: "Позиция в выдаче",
     status: worsened ? "found" : "not_confirmed",
     data: `Средняя позиция ${posBefore.toFixed(0)} → ${posNow.toFixed(0)}${
-      firstBad ? `, просадка с ${firstBad.date}` : ""
+      firstBad ? `, просадка с ${day(firstBad.date)}` : ""
     }`,
     formula: "средняя позиция за период; рост числа = ухудшение",
     conclusion: worsened
       ? `Карточка уехала с ${posBefore.toFixed(0)}-й на ${posNow.toFixed(
           0
-        )}-ю позицию${firstBad ? ` с ${firstBad.date}` : ""} — трафик упал вместе с ней.`
+        )}-ю позицию${firstBad ? ` с ${day(firstBad.date)}` : ""} — трафик упал вместе с ней.`
       : `Позиция стабильна (${posBefore.toFixed(0)} → ${posNow.toFixed(0)}).`,
     source: SOURCES.position,
     weight: worsened ? 70 + Math.min(20, posNow - posBefore) : 0,
@@ -316,13 +321,13 @@ function checkAds(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
     order: 7,
     title: "Реклама и продвижение",
     status: cut ? "found" : "not_confirmed",
-    data: `Расход на продвижение ${Math.round(before)} → ${Math.round(now)} ₽ (${delta}%)`,
+    data: `Расход на продвижение ${Math.round(before)} → ${Math.round(now)} ₽ (${num(delta)}%)`,
     formula: "(расход текущего периода − предыдущего) / предыдущего × 100",
     conclusion: cut
       ? `Бюджет продвижения срезан на ${Math.abs(
           delta ?? 0
         )}% — платный трафик ушёл, и заказы ушли вместе с ним.`
-      : `Бюджет продвижения существенно не менялся (${delta}%).`,
+      : `Бюджет продвижения существенно не менялся (${num(delta)}%).`,
     source: SOURCES.ads,
     weight: cut ? 50 + Math.min(20, Math.abs(delta ?? 0) / 5) : 0,
     action: cut

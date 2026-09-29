@@ -185,7 +185,11 @@ export async function POST(req: NextRequest) {
           2
         )
       );
-      answer = await synthesizeSalesDrop(report, detail);
+      // Предыдущие реплики уходят в синтез: «а почему?» должно читаться как
+      // продолжение разговора. Цифры модель всё равно берёт только из отчёта.
+      const b = body as { messages?: ClientMessage[] };
+      const history = (b.messages ?? []).slice(0, -1).filter((m) => m?.content);
+      answer = await synthesizeSalesDrop(report, detail, history);
     } else if (productRef) {
       const session = await runDiagnosis({ question, productRef });
       logDiagnosticSession(session);
