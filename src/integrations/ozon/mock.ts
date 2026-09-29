@@ -16,6 +16,11 @@ export interface OzonProduct {
   name: string;
   brand: string | null;
   category: string | null;
+  // Ozon «модель»: варианты одного товара (оттенки, объёмы) в одной карточке.
+  // Нужна, чтобы видеть линейку целиком: дефицит одного оттенка и затоваривание
+  // другого — это одна проблема планирования, а не две проблемы двух SKU.
+  // Не задана — товар сам себе модель (см. modelOf).
+  model_id?: string | null;
 
   // ── цена и юнит-экономика ──
   price: number; // текущая цена (с учётом акции), ₽
@@ -44,6 +49,11 @@ export interface OzonProduct {
   // ── отзывы ──
   reviews_count?: number | null;
   rating?: number | null;
+}
+
+// Модель товара: заданная или сам артикул (товар без вариантов).
+export function modelOf(p: OzonProduct): string {
+  return p.model_id ?? p.offer_id;
 }
 
 // Детерминированный сид от артикула. Производные мок-сигналы (дневные ряды,
@@ -346,6 +356,7 @@ export const MOCK_PRODUCTS: OzonProduct[] = [
   // ─────────────────────── ORTIKA — декоративная косметика ───────────────────
   {
     offer_id: "ORT-LIP-MAT-01",
+    model_id: "ORT-LIP-MAT",
     sku: 1400201,
     name: "ORTIKA Помада матовая устойчивая, тон 01 Nude",
     brand: "ORTIKA",
@@ -371,6 +382,7 @@ export const MOCK_PRODUCTS: OzonProduct[] = [
   },
   {
     offer_id: "ORT-LIP-MAT-04",
+    model_id: "ORT-LIP-MAT",
     sku: 1400202,
     name: "ORTIKA Помада матовая устойчивая, тон 04 Berry",
     brand: "ORTIKA",
@@ -396,6 +408,7 @@ export const MOCK_PRODUCTS: OzonProduct[] = [
   },
   {
     offer_id: "ORT-LIP-MAT-07",
+    model_id: "ORT-LIP-MAT",
     sku: 1400203,
     name: "ORTIKA Помада матовая устойчивая, тон 07 Coral",
     brand: "ORTIKA",
@@ -576,6 +589,7 @@ export const MOCK_PRODUCTS: OzonProduct[] = [
   // ───────────────────────── NOIRÉ — парфюмерия ─────────────────────────────
   {
     offer_id: "NOI-EDP-VET-50",
+    model_id: "NOI-EDP-VET",
     sku: 1400301,
     name: "NOIRÉ Vetiver Noir парфюмерная вода, 50 мл",
     brand: "NOIRÉ",
@@ -626,6 +640,7 @@ export const MOCK_PRODUCTS: OzonProduct[] = [
   },
   {
     offer_id: "NOI-EDP-VET-100",
+    model_id: "NOI-EDP-VET",
     sku: 1400303,
     name: "NOIRÉ Vetiver Noir парфюмерная вода, 100 мл",
     brand: "NOIRÉ",

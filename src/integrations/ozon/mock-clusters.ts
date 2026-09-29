@@ -52,6 +52,9 @@ const OVERRIDES: Record<string, { own_stock?: number; moscow_share?: number }> =
   // Тон кончается, а своего склада почти нет — нужна партия в производство.
   "ORT-LIP-MAT-04": { own_stock: 30 },
   "NOI-EDP-OUD-50": { own_stock: 8 },
+  // Товара хватает, но почти весь лежит в Москве — отгружали туда по привычке.
+  "ORT-MAS-VOL-10": { moscow_share: 0.9 },
+  "AVL-CRM-DAY-50": { moscow_share: 0.95 },
 };
 
 const BOX: Record<string, number> = {

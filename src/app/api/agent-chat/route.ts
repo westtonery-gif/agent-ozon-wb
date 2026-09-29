@@ -218,7 +218,7 @@ export async function POST(req: NextRequest) {
     } else {
       const scan = await runStoreScan({ question });
       logStoreScan(scan);
-      answer = await synthesizeScan(scan);
+      answer = await synthesizeScan(scan, dialogue, detail);
     }
 
     return new Response(answer, {

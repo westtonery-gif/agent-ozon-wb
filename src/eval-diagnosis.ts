@@ -3,6 +3,7 @@
 import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
 import { diagnoseSalesDrop } from "./knowledge/sales-drop";
 import { planSupply, supplyPlanCsv } from "./knowledge/supply-plan";
+import { detectPatterns } from "./knowledge/patterns";
 import type { ToolResult, ToolRunner } from "./knowledge/types";
 
 // Строка товара в форме, которую отдаёт get_products (Tool Registry).
@@ -433,6 +434,103 @@ async function main() {
         return csv.startsWith("﻿") && csv.split("\r\n").filter(Boolean).length === plan.lines.length + 1;
       })(),
       null
+    )
+  );
+
+  // ── Закономерности ──
+  // Главное здесь — отрицательные случаи: закономерность, найденная там,
+  // где её нет, хуже, чем никакой. Она уводит команду чинить не тот процесс.
+  const patterns = await detectPatterns();
+  const byId = (id: string) => patterns.find((p) => p.id === id);
+
+  results.push(
+    assert(
+      "patterns: перекос в линейке помад — дефицит Berry и затоваривание Coral",
+      !!byId("line_imbalance")?.skus.includes("ORT-LIP-MAT-04") &&
+        !!byId("line_imbalance")?.skus.includes("ORT-LIP-MAT-07"),
+      byId("line_imbalance")?.skus
+    ),
+    assert(
+      "patterns: сбалансированная линейка (Vetiver 50/100) перекосом не считается",
+      !patterns.some((p) => p.id === "line_imbalance" && p.skus.includes("NOI-EDP-VET-50")),
+      patterns.filter((p) => p.id === "line_imbalance").map((p) => p.skus)
+    ),
+    assert(
+      "patterns: все убыточные рекламы в акциях — одна закономерность, 17 642 ₽/мес",
+      byId("promo_ads_stacking")?.skus.length === 3 &&
+        byId("promo_ads_stacking")?.money.monthly_loss_rub === 17642,
+      byId("promo_ads_stacking")?.money
+    ),
+    assert(
+      "patterns: дефицитный товар в Москве — не «перекос», а правильное решение",
+      !byId("regional_gap")?.skus.includes("ORT-LIP-MAT-04") &&
+        !byId("regional_gap")?.skus.includes("AVL-SER-NIAC-30"),
+      byId("regional_gap")?.skus
+    ),
+    assert(
+      "patterns: заморожено 636 920 ₽ сверх трёх месяцев продаж",
+      byId("overstock_capital")?.money.frozen_rub === 636920,
+      byId("overstock_capital")?.money
+    ),
+    assert(
+      "patterns: товар из перекоса линейки не дублируется в «замороженных деньгах»",
+      !byId("overstock_capital")?.skus.includes("ORT-LIP-MAT-07"),
+      byId("overstock_capital")?.skus
+    ),
+    assert(
+      "patterns: у каждой — факт, гипотеза, действие и адресат",
+      patterns.every((p) => p.headline && p.finding && p.hypothesis && p.action && p.owner),
+      patterns.filter((p) => !p.headline || !p.owner).map((p) => p.id)
+    ),
+    assert(
+      "patterns: процесс подан как гипотеза («похоже»), а не как факт",
+      patterns.every((p) => /^Похоже/.test(p.hypothesis)),
+      patterns.map((p) => p.hypothesis.slice(0, 20))
+    ),
+    assert(
+      "patterns: сначала дороже — ранжирование по деньгам (месяц приведён к году)",
+      patterns[0]?.id === "overstock_capital",
+      patterns.map((p) => p.id)
+    )
+  );
+
+  // Один товар в акции с убыточной рекламой — ещё не практика компании.
+  const single = await detectPatterns({
+    tools: toolsFor([
+      product({ offer_id: "A", ad_spend_30d: 10_000, ad_orders_30d: 10, in_promo: true }),
+      product({ offer_id: "B" }),
+    ]),
+  });
+  results.push(
+    assert(
+      "patterns: одно совпадение — не закономерность",
+      !single.some((p) => p.id === "promo_ads_stacking"),
+      single.map((p) => p.id)
+    )
+  );
+
+  // Нет себестоимости — рубли неизвестны, а не ноль.
+  const noCostPatterns = await detectPatterns({
+    tools: toolsFor([
+      product({ offer_id: "X1", stock: 900, orders_30d: 3, cost_price: null }),
+      product({ offer_id: "X2", stock: 800, orders_30d: 2, cost_price: null }),
+    ]),
+  });
+  results.push(
+    assert(
+      "patterns: без себестоимости «заморожено» — неизвестно, а не 0 ₽",
+      noCostPatterns.find((p) => p.id === "overstock_capital")?.money.frozen_rub === null,
+      noCostPatterns.map((p) => ({ id: p.id, money: p.money }))
+    )
+  );
+
+  // Вопрос про сток не должен тащить в ответ закономерность про рекламу.
+  const stockScan = await runStoreScan({ question: "что со стоком?" });
+  results.push(
+    assert(
+      "patterns: в ответе на вопрос про сток нет закономерности маркетинга",
+      stockScan.patterns.length > 0 && !stockScan.patterns.some((p) => p.owner === "маркетинг"),
+      stockScan.patterns.map((p) => p.owner)
     )
   );
 

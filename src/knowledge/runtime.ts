@@ -3,14 +3,14 @@
 import { listUnits, loadUnit, severityRank, type KnowledgeUnit } from "./load";
 import { resolveMetrics } from "./resolver";
 import { diagnose } from "./diagnose";
-import { realToolRunner } from "./tools";
+import { memoizeTools, realToolRunner } from "./tools";
+import { detectPatterns, type Pattern } from "./patterns";
 import type {
   DiagnosticSession,
   ProductRef,
   ScanFinding,
   ScannedProduct,
   StoreScan,
-  ToolResult,
   ToolRunner,
 } from "./types";
 
@@ -91,20 +91,15 @@ export async function runDiagnosis(opts: RunOpts): Promise<DiagnosticSession> {
   };
 }
 
-// Один вызов инструмента на весь обход. Без этого сканирование 26 товаров
-// означало бы 26 одинаковых запросов в Ozon (и мгновенный 429 на живых ключах).
-function memoize(runner: ToolRunner): ToolRunner {
-  const cache = new Map<string, Promise<ToolResult>>();
-  return (tool, context) => {
-    // Ключ включает контекст: search_competitors зависит от товара, get_products — нет.
-    const key = `${tool}:${context?.offer_id ?? ""}`;
-    const hit = cache.get(key);
-    if (hit) return hit;
-    const fresh = runner(tool, context);
-    cache.set(key, fresh);
-    return fresh;
-  };
-}
+// Какие отделы относятся к вопросу. На «что со стоком?» закономерность про
+// рекламу в акциях — не ответ; на «проанализируй магазин» — все.
+const OWNERS_BY_CATEGORY: Record<string, string[]> = {
+  inventory: ["производство", "логистика", "коммерция"],
+  pricing: ["маркетинг", "коммерция"],
+  traffic: ["маркетинг", "логистика"],
+  competition: ["маркетинг"],
+  diagnostics: ["производство", "логистика", "коммерция", "маркетинг"],
+};
 
 interface ScanOpts {
   question: string;
@@ -117,7 +112,7 @@ interface ScanOpts {
 // по severity — то есть список «что горит», а не отчёт по всем SKU.
 export async function runStoreScan(opts: ScanOpts): Promise<StoreScan> {
   const { question, limit = 8 } = opts;
-  const runTool = memoize(opts.tools ?? realToolRunner);
+  const runTool = memoizeTools(opts.tools ?? realToolRunner);
 
   // Если вопрос не попал ни в один юнит — это «проанализируй магазин», обходим
   // всеми предметными юнитами. Кросс-диагностические (category: diagnostics)
@@ -143,6 +138,7 @@ export async function runStoreScan(opts: ScanOpts): Promise<StoreScan> {
       products: [],
       findings: [],
       unavailable_metrics: [],
+      patterns: [],
       status: listing.state === "ok" ? "needs_metrics" : "data_unavailable",
     };
   }
@@ -188,6 +184,17 @@ export async function runStoreScan(opts: ScanOpts): Promise<StoreScan> {
       a.product.offer_id.localeCompare(b.product.offer_id)
   );
 
+  // Закономерности считаются по тем же инструментам (runTool мемоизирован —
+  // Ozon второй раз не дёргаем) и фильтруются по отделам, к которым относится вопрос.
+  const owners = new Set(
+    matched.length
+      ? units.flatMap((u) => OWNERS_BY_CATEGORY[u.category] ?? [])
+      : Object.values(OWNERS_BY_CATEGORY).flat()
+  );
+  const patterns: Pattern[] = (await detectPatterns({ tools: runTool })).filter((p) =>
+    owners.has(p.owner)
+  );
+
   return {
     question,
     scope: "store",
@@ -196,6 +203,7 @@ export async function runStoreScan(opts: ScanOpts): Promise<StoreScan> {
     products,
     findings: findings.slice(0, limit),
     unavailable_metrics: [...unavailable],
-    status: findings.length ? "complete" : "no_findings",
+    patterns,
+    status: findings.length || patterns.length ? "complete" : "no_findings",
   };
 }

@@ -5,6 +5,7 @@ import OpenAI from "openai";
 import { OZONOLOGIST_DOMAIN, OZONOLOGIST_VOICE } from "../agents/ozonologist";
 import type { SalesDropReport } from "./sales-drop";
 import type { SupplyPlan } from "./supply-plan";
+import { plural } from "./ru";
 import type { DiagnosticSession, StoreScan } from "./types";
 
 // Клиент создаётся при первом вызове, а не при загрузке модуля: иначе
@@ -40,18 +41,41 @@ ${RULES}
 
 ОБХОД АССОРТИМЕНТА
 
-Ты прошёл по всем товарам и принёс человеку сводку. Говори как менеджер,
-который вернулся с обхода: сколько посмотрел, что из этого горит, с чего
-начать сегодня.
+Ты прошёл по всем товарам и возвращаешься к человеку с тем, что понял.
+Движок дал тебе два слоя:
+- patterns — закономерности: что у проблем общего, какой процесс за этим стоит,
+  сколько это стоит и какой отдел чинит. Это главное.
+- findings — отдельные находки по SKU. Это примеры и то, что ни в одну
+  закономерность не вошло.
 
-Разбирай только critical и high, группируя одинаковые проблемы — «три SKU
-уйдут в ноль раньше, чем приедет партия» читается лучше, чем три отдельных
-пункта. Medium сверни в одну фразу и предложи раскрыть. Товары без находок
-не упоминай вовсе. Если чего-то не хватило для выводов — скажи в конце одной
-фразой, без списка.
+Начни с закономерностей, по убыванию денег. По каждой — что совпало, во что
+обходится и кому что делать. Процесс, который за этим стоит, — гипотеза:
+говори «похоже», и предложи, что проверить. Отдельные SKU упоминай только
+как иллюстрацию к закономерности или если critical-находка ни в одну не
+вошла. Остальное сверни одной фразой и предложи раскрыть.
 
-Здесь список уместен, но короткий: сгруппированные проблемы, по строке на
-группу. Не превращай его в таблицу и не подписывай поля.
+Если закономерностей нет — тогда уже сгруппируй находки по типу проблемы.
+
+ПРИМЕР
+
+Плохо (отчёт по SKU):
+  Проверено 24 SKU. AVL-TON-AHA-200 — залежался, 2600 дней запаса.
+  AVL-MSK-CLAY-75 — залежался. ORT-LIP-MAT-07 — залежался. ORT-LIP-MAT-04 —
+  подсортировка опоздала. ORT-EYE-PAL-12 — реклама в минус…
+
+Хорошо (аналитик рассказывает про процессы):
+  Если коротко — у вас три проблемы, и все три про то, как принимаются
+  решения, а не про конкретные товары.
+  Больше всего денег стоит сток: 637 тысяч по себестоимости лежат в четырёх
+  позициях на год вперёд, и три из них уже в акциях — не уходят и со скидкой.
+  Похоже, скидка тут не тот инструмент: коммерции стоит решить по каждой —
+  набор, уценка по сроку или вывод из матрицы.
+  Вторая — реклама. Все три товара, где продвижение уходит в минус, стоят
+  в акциях, это 17,6 тысячи в месяц. Похоже, акции и продвижение
+  согласуют раздельно — маркетингу на время акции стоит снижать ставку.
+  И помады ORTIKA: Berry кончается, а Coral лежит 480 штук. Производят
+  оттенки поровну, а покупают нет — следующую партию надо делить по продажам.
+  Есть ещё перекос остатков в Москву, но он дешевле — рассказать?
 `;
 
 export async function synthesize(session: DiagnosticSession): Promise<string> {
@@ -86,7 +110,57 @@ export async function synthesize(session: DiagnosticSession): Promise<string> {
   return completion.choices[0].message.content ?? "";
 }
 
-export async function synthesizeScan(scan: StoreScan): Promise<string> {
+const k = (n: number) =>
+  n >= 10_000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1).replace(".", ",")} тыс. ₽` : `${n} ₽`;
+
+// Запасной рендер обхода: закономерности, потом то, что в них не вошло.
+export function renderScan(scan: StoreScan, detail = false): string {
+  const lines: string[] = [];
+  const covered = new Set(scan.patterns.flatMap((p) => p.skus));
+
+  if (scan.patterns.length) {
+    lines.push(
+      `Проверил ${scan.products_scanned} SKU. Главное — не отдельные товары, а ${plural(
+        scan.patterns.length,
+        "закономерность",
+        "закономерности",
+        "закономерностей"
+      )}:`
+    );
+    for (const p of scan.patterns) {
+      const money = [
+        p.money.frozen_rub ? `заморожено ${k(p.money.frozen_rub)}` : null,
+        p.money.lost_margin_rub ? `недополучим ${k(p.money.lost_margin_rub)} маржи` : null,
+        p.money.monthly_loss_rub ? `теряем ${k(p.money.monthly_loss_rub)} в месяц` : null,
+      ].filter(Boolean);
+      lines.push(
+        "",
+        detail
+          ? `**${p.title}** (${p.owner}${money.length ? `, ${money.join(", ")}` : ""}). ${p.finding} ${p.hypothesis} ${p.action}`
+          : `**${p.title}.** ${p.headline} ${p.hypothesis} ${p.action}`
+      );
+    }
+  }
+
+  const rest = scan.findings.filter(
+    (f) => !covered.has(f.product.offer_id) && f.diagnosis.severity === "critical"
+  );
+  if (rest.length) {
+    lines.push("", "Отдельно, вне закономерностей:");
+    for (const f of rest) lines.push(`- ${f.product.name}: ${f.diagnosis.findings[0]}`);
+  }
+  if (!lines.length) {
+    lines.push(`Проверил ${scan.products_scanned} SKU — отклонений, требующих действия, нет.`);
+  }
+  lines.push("", "_Данные тестовые._");
+  return lines.join("\n");
+}
+
+export async function synthesizeScan(
+  scan: StoreScan,
+  history: Turn[] = [],
+  detail = false
+): Promise<string> {
   if (scan.status === "data_unavailable") {
     return "Не удалось получить данные магазина — ответ был бы догадкой. Проверьте доступ к Ozon и повторите.";
   }
@@ -94,43 +168,56 @@ export async function synthesizeScan(scan: StoreScan): Promise<string> {
     return "В кабинете не найдено товаров для анализа.";
   }
   if (scan.status === "no_findings") {
-    return `Проверено ${scan.products_scanned} SKU по правилам: ${scan.units.join(
-      ", "
-    )}. Отклонений, требующих действия, не найдено.`;
+    return `Проверил ${scan.products_scanned} SKU — отклонений, требующих действия, нет.`;
   }
 
+  const covered = new Set(scan.patterns.flatMap((p) => p.skus));
   const facts = {
     products_scanned: scan.products_scanned,
-    units_applied: scan.units,
-    findings: scan.findings.map((f) => ({
-      sku: f.product.offer_id,
-      name: f.product.name,
-      brand: f.product.brand,
-      rule: f.diagnosis.matched_rule,
-      severity: f.diagnosis.severity,
-      funnel_stage: f.diagnosis.funnel_stage,
-      finding: f.diagnosis.findings[0],
-      evidence: f.evidence.map((m) => ({ id: m.metric_id, value: m.value })),
+    patterns: scan.patterns.map((p) => ({
+      title: p.title,
+      owner: p.owner,
+      money: p.money,
+      headline: p.headline,
+      finding: p.finding,
+      hypothesis: p.hypothesis,
+      action: p.action,
+      skus: p.skus,
     })),
+    // Находки, которые не вошли ни в одну закономерность, — отдельно.
+    findings_outside_patterns: scan.findings
+      .filter((f) => !covered.has(f.product.offer_id))
+      .map((f) => ({
+        sku: f.product.offer_id,
+        name: f.product.name,
+        severity: f.diagnosis.severity,
+        finding: f.diagnosis.findings[0],
+        evidence: f.evidence.map((m) => ({ id: m.metric_id, value: m.value })),
+      })),
     unavailable_metrics: scan.unavailable_metrics,
   };
 
-  const completion = await client().chat.completions.create({
-    model: "gpt-5.5",
-    messages: [
-      { role: "system", content: SCAN_SYSTEM },
-      {
-        role: "user",
-        content: `Вопрос: ${scan.question}\n\nНАХОДКИ (JSON):\n${JSON.stringify(
-          facts,
-          null,
-          2
-        )}\n\nСформулируй ответ менеджеру.`,
-      },
-    ],
-  });
-
-  return completion.choices[0].message.content ?? "";
+  try {
+    const completion = await client().chat.completions.create({
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: SCAN_SYSTEM },
+        ...recent(history),
+        {
+          role: "user",
+          content: `${detail ? "Просят подробности — разверни каждую закономерность с цифрами по SKU.\n\n" : ""}Вопрос: ${scan.question}\n\nОТЧЁТ ДВИЖКА (JSON, только отсюда бери цифры):\n${JSON.stringify(
+            facts,
+            null,
+            2
+          )}`,
+        },
+      ],
+    });
+    return completion.choices[0].message.content ?? renderScan(scan, detail);
+  } catch {
+    // Нет ключа, упал прокси, лимит — ответ всё равно должен быть.
+    return renderScan(scan, detail);
+  }
 }
 
 // ── Режим «Диагностика падения продаж» ───────────────────────────────────
@@ -183,16 +270,6 @@ ${RULES}
   или бой при доставке. От этого зависит, что чинить — производство,
   карточку или упаковку. Там ещё вопрос по заполненности карточки, но он
   мельче — сказать?`;
-
-// Согласование числительных: «1 причина», «2 причины», «5 причин».
-function plural(n: number, one: string, few: string, many: string): string {
-  const mod100 = n % 100;
-  const mod10 = n % 10;
-  if (mod100 >= 11 && mod100 <= 14) return `${n} ${many}`;
-  if (mod10 === 1) return `${n} ${one}`;
-  if (mod10 >= 2 && mod10 <= 4) return `${n} ${few}`;
-  return `${n} ${many}`;
-}
 
 // Как называть причину в живой фразе «Похоже на …».
 const PRIMARY_LEAD: Record<string, string> = {

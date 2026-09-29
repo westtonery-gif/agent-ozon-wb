@@ -1,7 +1,7 @@
 // Tool Registry — ЕДИНСТВЕННАЯ граница с Ozon. Возвращает нормализованные данные
 // и состояние (ToolErrorState). Никто выше в стек Ozon-клиент не импортирует.
 import { getProducts, getSalesSummary } from "../integrations/ozon/store";
-import { shelfLifeLeftDays, shelfLifeLeftPct } from "../integrations/ozon/mock";
+import { modelOf, shelfLifeLeftDays, shelfLifeLeftPct } from "../integrations/ozon/mock";
 import type { ToolResult, ToolErrorState, ToolContext, ToolRunner } from "./types";
 
 // Заглушка внешнего рынка. Реальный источник (MPStat / Moneyplace / парсер выдачи)
@@ -48,6 +48,7 @@ async function get_products(): Promise<ToolResult> {
       name: p.name,
       brand: p.brand,
       category: p.category,
+      model_id: modelOf(p),
 
       price: p.price,
       old_price: p.old_price,
@@ -127,3 +128,18 @@ export const realToolRunner: ToolRunner = async (tool, context) => {
       return { tool, state: "upstream_unavailable", data: null };
   }
 };
+
+// Один вызов инструмента на весь проход по ассортименту. Без этого обход
+// 24 товаров означал бы 24 одинаковых запроса в Ozon (и мгновенный 429 на
+// живых ключах). Ключ включает контекст: search_competitors зависит от товара.
+export function memoizeTools(runner: ToolRunner): ToolRunner {
+  const cache = new Map<string, Promise<ToolResult>>();
+  return (tool, context) => {
+    const key = `${tool}:${context?.offer_id ?? ""}`;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const fresh = runner(tool, context);
+    cache.set(key, fresh);
+    return fresh;
+  };
+}

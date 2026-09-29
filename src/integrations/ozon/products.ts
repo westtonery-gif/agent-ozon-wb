@@ -31,6 +31,8 @@ interface ProductInfoItem {
   sku?: number; // нужен, чтобы сопоставить товар с заказами из аналитики
   reviews_count?: number; // если Ozon вернёт — берём; иначе останется unknown
   rating?: number;
+  // Объединение вариантов в одну карточку (оттенки, объёмы).
+  model_info?: { model_id?: number; count?: number };
   // Ozon отдаёт остатки массивом по складам/источникам: stocks.stocks[].present
   stocks?: { stocks?: ProductInfoStock[] };
 }
@@ -78,6 +80,8 @@ export async function getProductsDetailed(): Promise<OzonProduct[]> {
       // Бренд и категорию Seller API в этом ответе не отдаёт — оставляем unknown.
       brand: null,
       category: null,
+      // Модель Seller API отдаёт: варианты одной карточки получают общий id.
+      model_id: p.model_info?.model_id ? String(p.model_info.model_id) : null,
       price,
       old_price: oldPrice || price,
       // Себестоимость и условия живут в ERP продавца, а не в Ozon: null = нет данных.

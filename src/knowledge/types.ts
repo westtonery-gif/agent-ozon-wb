@@ -98,6 +98,9 @@ export interface StoreScan {
   products: ScannedProduct[];
   findings: ScanFinding[]; // отсортированы по severity
   unavailable_metrics: string[]; // чего не хватило и почему вывод может быть неполным
+  // Закономерности поверх находок: что у симптомов общего и какой процесс за
+  // этим стоит. Главное в ответе — они, отдельные SKU идут как примеры.
+  patterns: import("./patterns").Pattern[];
   status: "complete" | "no_findings" | "needs_metrics" | "data_unavailable";
 }
 
