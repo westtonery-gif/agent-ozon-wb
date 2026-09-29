@@ -1,6 +1,7 @@
 // Offline eval: инструменты Ozon и рынка замоканы, LLM-синтез не вызывается.
 // Проверяем детерминированный слой — роутер, резолвер, формулы, правила.
 import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
+import { diagnoseSalesDrop } from "./knowledge/sales-drop";
 import type { ToolResult, ToolRunner } from "./knowledge/types";
 
 // Строка товара в форме, которую отдаёт get_products (Tool Registry).
@@ -310,6 +311,72 @@ async function main() {
       new Set(scan.findings.map((f) => `${f.product.offer_id}:${f.diagnosis.matched_rule}`)).size ===
         scan.findings.length,
       scan.findings.map((f) => `${f.product.offer_id}:${f.diagnosis.matched_rule}`)
+    )
+  );
+
+  // ── Режим «Диагностика падения продаж» ──
+  // Идёт по реальному моку (офлайн, без LLM): каждый SKU со сценарием должен
+  // дать именно свою причину, иначе проверки ловят шум, а не сигнал.
+  const expected: Array<[string, string]> = [
+    ["AVL-SER-NIAC-30", "stock"],
+    ["ORT-LIP-MAT-04", "price"],
+    ["NOI-EDP-CIT-50", "position"],
+    ["ORT-BLS-PWD-05", "reviews"],
+    ["AVL-CRM-DAY-50", "ads"],
+  ];
+  for (const [sku, cause] of expected) {
+    const r = await diagnoseSalesDrop(sku, 7);
+    results.push(
+      assert(
+        `drop ${sku}: падение найдено, главная причина — ${cause}`,
+        r.is_drop && r.primary?.id === cause,
+        { is_drop: r.is_drop, primary: r.primary?.id }
+      )
+    );
+  }
+
+  const control = await diagnoseSalesDrop("ORT-MAS-VOL-10", 7);
+  results.push(
+    assert(
+      "drop: товар без падения — is_drop false и причина не назначается",
+      !control.is_drop && control.primary === null,
+      { is_drop: control.is_drop, primary: control.primary?.id }
+    )
+  );
+
+  const anySku = await diagnoseSalesDrop("AVL-SER-NIAC-30", 7);
+  results.push(
+    assert(
+      "drop: все 8 проверок выполнены в заданном порядке",
+      anySku.checks.length === 8 && anySku.checks.every((c, i) => c.order === i + 1),
+      anySku.checks.map((c) => `${c.order}.${c.id}`)
+    ),
+    assert(
+      "drop: у каждой проверки есть данные, вывод и источник",
+      anySku.checks.every((c) => c.data && c.conclusion && c.source),
+      anySku.checks.filter((c) => !c.data || !c.conclusion || !c.source).map((c) => c.id)
+    ),
+    assert(
+      "drop: конкуренты без MPSTATS — no_data, а не вывод",
+      anySku.checks.find((c) => c.id === "competitors")?.status === "no_data",
+      anySku.checks.find((c) => c.id === "competitors")?.status
+    ),
+    assert(
+      "drop: проверка без данных не попадает в причины",
+      anySku.no_data.every((c) => c.weight === 0) &&
+        ![anySku.primary, ...anySku.others].some((c) => c?.status === "no_data"),
+      anySku.no_data.map((c) => `${c.id}:${c.weight}`)
+    ),
+    assert(
+      "drop: неизвестный артикул не выдумывает диагноз",
+      (await diagnoseSalesDrop("НЕТ-ТАКОГО", 7)).status === "unknown_sku",
+      (await diagnoseSalesDrop("НЕТ-ТАКОГО", 7)).status
+    ),
+    assert(
+      "drop: ряд детерминирован — повторный запуск даёт тот же диагноз",
+      JSON.stringify((await diagnoseSalesDrop("ORT-LIP-MAT-04", 7)).drop) ===
+        JSON.stringify((await diagnoseSalesDrop("ORT-LIP-MAT-04", 7)).drop),
+      null
     )
   );
 

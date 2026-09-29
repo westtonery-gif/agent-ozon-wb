@@ -7,9 +7,12 @@ import { getSalesSummaryLive } from "./analytics";
 import {
   MOCK_PRODUCTS,
   MOCK_SALES,
+  cardContent,
+  type CardContent,
   type OzonProduct,
   type OzonSalesSummary,
 } from "./mock";
+import { dailySeries, type DailyPoint } from "./mock-timeseries";
 
 // Мок включается, если явно задан OZON_MOCK=true,
 // либо если реальные ключи Ozon не заданы (например, на машине разработчика).
@@ -29,6 +32,32 @@ export async function getSalesSummary(): Promise<OzonSalesSummary> {
   if (isMock()) return MOCK_SALES;
   // Живой режим: продажи из Seller API. Реклама/ДРР пока null (нужен Performance API).
   return getSalesSummaryLive();
+}
+
+// Дневной ряд по товару за период. Нужен режиму «Диагностика падения продаж»:
+// без истории нельзя сказать ни насколько упало, ни с какого дня.
+//
+// В живом режиме собирается не из одного вызова: заказы/выручка/сессии есть в
+// /v1/analytics/data с dimension ["sku","day"], а истории остатка, цены и
+// позиции Seller API не отдаёт вовсе — их нужно снимать самим в свою базу.
+// Поэтому здесь пока честный null: лучше «нет данных», чем ряд наполовину
+// из API, наполовину из догадок.
+export async function getSkuDaily(
+  offerId: string,
+  days = 28
+): Promise<DailyPoint[] | null> {
+  if (!isMock()) return null;
+  const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
+  return product ? dailySeries(product, days) : null;
+}
+
+// Контент карточки: число фото, заполненность характеристик, контент-рейтинг,
+// замечания модерации. В живом режиме — отдельные вызовы Seller API, пока не
+// подключены, поэтому null.
+export async function getCardContent(offerId: string): Promise<CardContent | null> {
+  if (!isMock()) return null;
+  const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
+  return product ? cardContent(product) : null;
 }
 
 // Человекочитаемое сообщение по ошибке запроса к Ozon (для страниц и агента).

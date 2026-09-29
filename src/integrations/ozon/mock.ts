@@ -46,6 +46,56 @@ export interface OzonProduct {
   rating?: number | null;
 }
 
+// Детерминированный сид от артикула. Производные мок-сигналы (дневные ряды,
+// контент карточки) должны быть воспроизводимыми: со случайными значениями
+// один и тот же вопрос давал бы разные диагнозы.
+export function seedOf(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+// ── Контент карточки (проверка «карточка» в диагностике падения) ──
+export interface CardContent {
+  photos_count: number;
+  attributes_filled_pct: number;
+  content_rating: number; // контент-рейтинг Ozon, 0-100
+  moderation_note: string | null;
+}
+
+// Карточки с намеренными дырами. Остальные заполняются нормально.
+const CONTENT_OVERRIDES: Record<string, Partial<CardContent>> = {
+  "ORT-BLS-PWD-05": {
+    photos_count: 2,
+    attributes_filled_pct: 48,
+    content_rating: 42,
+    moderation_note: "Не указан состав (INCI) — обязателен для косметики",
+  },
+  "AVL-TON-AHA-200": {
+    photos_count: 3,
+    attributes_filled_pct: 61,
+    content_rating: 55,
+    moderation_note: null,
+  },
+};
+
+export function cardContent(p: OzonProduct): CardContent {
+  const h = seedOf(p.offer_id);
+  // Сдвиг только беззнаковый: h — uint32, и обычный >> на значениях ≥ 2^31
+  // даёт отрицательное число, из-за чего «заполненность» уезжала ниже порога
+  // и карточка ложно помечалась неполной.
+  return {
+    photos_count: 5 + (h % 4),
+    attributes_filled_pct: 86 + ((h >>> 3) % 13),
+    content_rating: 80 + ((h >>> 7) % 16),
+    moderation_note: null,
+    ...CONTENT_OVERRIDES[p.offer_id],
+  };
+}
+
 // Остаточный срок годности в днях. null, если дата производства или срок неизвестны
 // (живой режим) — тогда метрика останется unknown и движок её не использует.
 export function shelfLifeLeftDays(p: OzonProduct): number | null {

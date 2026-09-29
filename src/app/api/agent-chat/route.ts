@@ -1,6 +1,12 @@
 import { NextRequest } from "next/server";
 import { runDiagnosis, runStoreScan } from "../../../knowledge/runtime";
-import { synthesize, synthesizeScan } from "../../../knowledge/synthesize";
+import { diagnoseSalesDrop } from "../../../knowledge/sales-drop";
+import {
+  synthesize,
+  synthesizeSalesDrop,
+  synthesizeScan,
+} from "../../../knowledge/synthesize";
+import { getProducts } from "../../../integrations/ozon/store";
 import type { DiagnosticSession, ProductRef, StoreScan } from "../../../knowledge/types";
 
 type ClientMessage = { role: "user" | "assistant"; content: string };
@@ -13,6 +19,40 @@ function extractProductRef(body: unknown): ProductRef | undefined {
   if (typeof p.offer_id === "string") ref.offer_id = p.offer_id;
   if (typeof p.sku === "number") ref.sku = p.sku;
   return ref.offer_id || ref.sku !== undefined ? ref : undefined;
+}
+
+// Артикул, названный в тексте. Сверяем с реальным списком товаров, а не с
+// регуляркой: артикул — это то, что есть в кабинете, а не то, что похоже на него.
+function findOfferId(text: string, knownIds: string[]): string | null {
+  const lower = text.toLowerCase();
+  // Самый длинный совпавший — чтобы «AVL-SER-NIAC-30» не проиграл «AVL-SER».
+  return (
+    knownIds
+      .filter((id) => lower.includes(id.toLowerCase()))
+      .sort((a, b) => b.length - a.length)[0] ?? null
+  );
+}
+
+// Просят раскрыть остальные причины. Нужно, потому что короткий ответ по
+// умолчанию называет только главную.
+const DETAIL_RE =
+  /подробн|детал|остальн|все причины|полный|разверн|что ещё|что еще|покажи всё|покажи все/i;
+
+// Период сравнения: «за 14 дней» → 14. По умолчанию 7 против предыдущих 7.
+function periodDays(text: string): number {
+  const m = text.match(/(\d{1,2})\s*дн/i);
+  const n = m ? Number(m[1]) : 7;
+  return n >= 3 && n <= 30 ? n : 7;
+}
+
+// Все сообщения диалога, новые первыми. Памяти у роута нет, но история
+// приходит с фронта — по ней находим SKU, о котором шла речь, когда в самом
+// вопросе («подробнее») его уже нет.
+function historyText(body: unknown): string[] {
+  const b = body as { messages?: ClientMessage[] };
+  return Array.isArray(b.messages)
+    ? [...b.messages].reverse().map((m) => m?.content ?? "")
+    : [];
 }
 
 function latestUserQuestion(body: unknown): string {
@@ -113,12 +153,40 @@ export async function POST(req: NextRequest) {
     }
 
     const productRef = extractProductRef(body);
+    const detail = DETAIL_RE.test(question);
 
-    // Назван конкретный товар — разбираем его. Товар не назван — вопрос
-    // менеджера по определению про ассортимент, а не про первую попавшуюся
-    // карточку: идём обходом по всем SKU.
+    // Артикул ищем сначала в самом вопросе, потом в истории: на «подробнее»
+    // товар уже не назван, но речь всё ещё о нём.
+    const knownIds = (await getProducts()).map((p) => p.offer_id);
+    let offerId = productRef?.offer_id ?? findOfferId(question, knownIds);
+    if (!offerId && detail) {
+      for (const past of historyText(body)) {
+        offerId = findOfferId(past, knownIds);
+        if (offerId) break;
+      }
+    }
+
     let answer: string;
-    if (productRef) {
+    if (offerId) {
+      // Назван конкретный SKU — режим «Диагностика падения продаж»:
+      // восемь проверок по порядку, каждую делает код.
+      const report = await diagnoseSalesDrop(offerId, periodDays(question));
+      console.log(
+        "[sales-drop]",
+        JSON.stringify(
+          {
+            sku: report.offer_id,
+            period_days: report.period_days,
+            is_drop: report.is_drop,
+            primary: report.primary?.id ?? null,
+            checks: report.checks.map((c) => `${c.order}.${c.id}=${c.status}`),
+          },
+          null,
+          2
+        )
+      );
+      answer = await synthesizeSalesDrop(report, detail);
+    } else if (productRef) {
       const session = await runDiagnosis({ question, productRef });
       logDiagnosticSession(session);
       answer =
