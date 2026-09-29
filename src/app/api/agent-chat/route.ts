@@ -1,10 +1,12 @@
 import { NextRequest } from "next/server";
 import { runDiagnosis, runStoreScan } from "../../../knowledge/runtime";
 import { diagnoseSalesDrop } from "../../../knowledge/sales-drop";
+import { planSupply } from "../../../knowledge/supply-plan";
 import {
   synthesize,
   synthesizeSalesDrop,
   synthesizeScan,
+  synthesizeSupplyPlan,
 } from "../../../knowledge/synthesize";
 import { getProducts } from "../../../integrations/ozon/store";
 import type { DiagnosticSession, ProductRef, StoreScan } from "../../../knowledge/types";
@@ -37,6 +39,12 @@ function findOfferId(text: string, knownIds: string[]): string | null {
 // умолчанию называет только главную.
 const DETAIL_RE =
   /подробн|детал|остальн|все причины|полный|разверн|что ещё|что еще|покажи всё|покажи все/i;
+
+// Вопрос про поставки: куда и сколько везти, запрос на отгрузку. Проверяется
+// раньше общего обхода — иначе «что отгружать?» ушло бы в диагностику остатков,
+// которая скажет «кончается», но не скажет «вези 22 шт в Москву».
+const SUPPLY_RE =
+  /поставк|отгруз|на как(ие|ой) склад|куда вез|сколько вез|что вез|кластер|распредел.*склад/i;
 
 // Период сравнения: «за 14 дней» → 14. По умолчанию 7 против предыдущих 7.
 function periodDays(text: string): number {
@@ -166,8 +174,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    const b = body as { messages?: ClientMessage[] };
+    const dialogue = (b.messages ?? []).slice(0, -1).filter((m) => m?.content);
+
     let answer: string;
-    if (offerId) {
+    if (SUPPLY_RE.test(question)) {
+      // План поставок: что, куда и сколько везти. Назван артикул — по нему,
+      // нет — по всему ассортименту.
+      const plan = await planSupply(offerId ? { offerIds: [offerId] } : {});
+      console.log(
+        "[supply-plan]",
+        JSON.stringify({ totals: plan.totals, production: plan.production.map((p) => p.offer_id) })
+      );
+      answer = await synthesizeSupplyPlan(plan, dialogue);
+    } else if (offerId) {
       // Назван конкретный SKU — режим «Диагностика падения продаж»:
       // восемь проверок по порядку, каждую делает код.
       const report = await diagnoseSalesDrop(offerId, periodDays(question));
@@ -187,9 +207,7 @@ export async function POST(req: NextRequest) {
       );
       // Предыдущие реплики уходят в синтез: «а почему?» должно читаться как
       // продолжение разговора. Цифры модель всё равно берёт только из отчёта.
-      const b = body as { messages?: ClientMessage[] };
-      const history = (b.messages ?? []).slice(0, -1).filter((m) => m?.content);
-      answer = await synthesizeSalesDrop(report, detail, history);
+      answer = await synthesizeSalesDrop(report, detail, dialogue);
     } else if (productRef) {
       const session = await runDiagnosis({ question, productRef });
       logDiagnosticSession(session);

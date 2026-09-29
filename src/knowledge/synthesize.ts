@@ -4,6 +4,7 @@
 import OpenAI from "openai";
 import { OZONOLOGIST_DOMAIN, OZONOLOGIST_VOICE } from "../agents/ozonologist";
 import type { SalesDropReport } from "./sales-drop";
+import type { SupplyPlan } from "./supply-plan";
 import type { DiagnosticSession, StoreScan } from "./types";
 
 // Клиент создаётся при первом вызове, а не при загрузке модуля: иначе
@@ -334,5 +335,114 @@ export async function synthesizeSalesDrop(
   } catch {
     // Ключа нет, прокси упал, лимит — ответ всё равно должен быть.
     return renderSalesDrop(r, detail);
+  }
+}
+
+// ── План поставок ────────────────────────────────────────────────────────
+
+const SUPPLY_SYSTEM = `${OZONOLOGIST_DOMAIN}
+${RULES}
+
+ПЛАН ПОСТАВОК
+
+Движок посчитал, что, куда и сколько везти, и где своего склада не хватает.
+Расскажи это как менеджер, который собрал поставку на неделю и объясняет
+команде: сколько всего едет, что горит, где нужна партия в производство.
+
+Что важно видеть за цифрами и говорить вслух:
+- «лежит 0, ехать 8 дней» — покупатели в этом кластере уже сейчас ждут
+  доставку из другого региона: дольше и дороже, а срок видно в карточке;
+- если своего склада не хватает — дефицит ушёл туда, где товар продаётся
+  быстрее, а остальные регионы закроет производственная партия. Назови цикл
+  производства: это то, сколько регионы будут без товара;
+- товары, которые никуда не нужно везти, не перечисляй.
+
+Полный запрос на отгрузку — в файле, ссылку дадут отдельно. Не пересказывай
+весь план построчно: главное, срочное, производство.
+
+ПРИМЕР
+
+Плохо:
+  Итого к отгрузке: 267 шт, 22 короба, 5 SKU, 7 кластеров.
+  Срочных позиций: 15. Потребность в производстве: ORT-LIP-MAT-04 — 40 шт.
+
+Хорошо:
+  На эту неделю едет 267 штук по семи кластерам, почти всё — сыворотки
+  AVELINA: ниацинамид и гиалуронка сейчас лежат только в Москве, а в регионах
+  по нулям, и их покупатели ждут доставку по неделе.
+  С помадой Berry хуже: своих 30 штук, я их отдал Москве и Петербургу, там она
+  уходит быстрее всего. Остальным регионам нужно ещё 40 штук, а это партия
+  с циклом 25 дней — запускать надо сегодня, иначе почти месяц без неё.`;
+
+export function renderSupplyPlan(plan: SupplyPlan): string {
+  if (!plan.lines.length && !plan.production.length) {
+    return plan.no_data.length
+      ? `Для плана не хватает данных по ${plan.no_data.length} товарам — нужны остатки по складам и собственный склад.`
+      : `Везти ничего не нужно: во всех кластерах запаса хватает на ${plan.target_days} дней с учётом дороги.`;
+  }
+  const t = plan.totals;
+  const lines: string[] = [];
+  lines.push(
+    `На ближайшую поставку — ${t.units.toLocaleString("ru-RU")} шт по ${t.skus} товарам в ${t.clusters} кластеров.` +
+      (t.urgent ? ` В ${t.urgent} позициях товар уже на нуле или кончится раньше, чем доедет.` : "")
+  );
+  // by_cluster отсортирован по срочности; «больше всего» — это про объём.
+  const top = [...plan.by_cluster]
+    .sort((a, b) => b.units - a.units)
+    .slice(0, 3)
+    .map((c) => `${c.cluster_name} — ${c.units} шт`);
+  if (top.length) lines.push(`Больше всего везём: ${top.join(", ")}.`);
+  for (const n of plan.production) {
+    lines.push(
+      `${n.name}: своего склада ${n.own_stock} шт, не хватает ещё ${n.shortfall}` +
+        (n.lead_days ? ` — это партия в производство с циклом ${n.lead_days} дн.` : ".")
+    );
+  }
+  lines.push("[Скачать запрос на отгрузку (CSV)](/api/supply-plan)");
+  if (plan.is_mock) lines.push("_Данные тестовые._");
+  return lines.join("\n");
+}
+
+export async function synthesizeSupplyPlan(plan: SupplyPlan, history: Turn[] = []): Promise<string> {
+  if (!plan.lines.length && !plan.production.length) return renderSupplyPlan(plan);
+
+  const facts = {
+    target_days: plan.target_days,
+    totals: plan.totals,
+    by_cluster: plan.by_cluster,
+    urgent: plan.lines
+      .filter((l) => l.urgent)
+      .slice(0, 12)
+      .map((l) => ({
+        cluster: l.cluster_name,
+        sku: l.offer_id,
+        name: l.name,
+        qty: l.qty,
+        stock_now: l.stock_now,
+        days_left: l.days_left,
+        transit_days: l.transit_days,
+      })),
+    production: plan.production,
+    skipped_low_demand: plan.skipped_low_demand,
+    data_is_mock: plan.is_mock,
+  };
+
+  try {
+    const completion = await client().chat.completions.create({
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: SUPPLY_SYSTEM },
+        ...recent(history),
+        {
+          role: "user",
+          content: `Ответь коротко, как коллега.\n\nПЛАН (JSON, только отсюда бери цифры):\n${JSON.stringify(facts, null, 2)}`,
+        },
+      ],
+    });
+    const text = completion.choices[0].message.content;
+    // Ссылку на файл добавляем сами: модель не должна её выдумывать или терять.
+    return text ? `${text}\n\n[Скачать запрос на отгрузку (CSV)](/api/supply-plan)` : renderSupplyPlan(plan);
+  } catch {
+    return renderSupplyPlan(plan);
   }
 }

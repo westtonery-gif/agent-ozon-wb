@@ -2,6 +2,7 @@
 // Проверяем детерминированный слой — роутер, резолвер, формулы, правила.
 import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
 import { diagnoseSalesDrop } from "./knowledge/sales-drop";
+import { planSupply, supplyPlanCsv } from "./knowledge/supply-plan";
 import type { ToolResult, ToolRunner } from "./knowledge/types";
 
 // Строка товара в форме, которую отдаёт get_products (Tool Registry).
@@ -376,6 +377,61 @@ async function main() {
       "drop: ряд детерминирован — повторный запуск даёт тот же диагноз",
       JSON.stringify((await diagnoseSalesDrop("ORT-LIP-MAT-04", 7)).drop) ===
         JSON.stringify((await diagnoseSalesDrop("ORT-LIP-MAT-04", 7)).drop),
+      null
+    )
+  );
+
+  // ── План поставок ──
+  // Проверяем не арифметику, а бизнес-решения: именно в них планировщик
+  // ошибался при разработке, и ошибка выглядела правдоподобно.
+  const plan = await planSupply();
+
+  const scarce = plan.lines.filter((l) => l.offer_id === "ORT-LIP-MAT-04");
+  const mat04Moscow = scarce.find((l) => l.cluster_id === "msk")?.qty ?? 0;
+  const mat04Siberia = scarce.find((l) => l.cluster_id === "siberia")?.qty ?? 0;
+  results.push(
+    assert(
+      "supply: дефицит идёт туда, где продаётся быстрее (Москва), а не туда, где пусто",
+      mat04Moscow > 0 && mat04Siberia === 0,
+      scarce.map((l) => `${l.cluster_id}:${l.qty}`)
+    ),
+    assert(
+      "supply: при нехватке своего склада — потребность в производстве",
+      plan.production.some((n) => n.offer_id === "ORT-LIP-MAT-04" && n.shortfall > 0),
+      plan.production
+    ),
+    assert(
+      "supply: остаток меньше короба всё равно отгружается, а не лежит",
+      scarce.reduce((s, l) => s + l.qty, 0) === 30,
+      scarce.reduce((s, l) => s + l.qty, 0)
+    ),
+    assert(
+      "supply: в кластер с малым спросом не едет целый короб (год хранения)",
+      plan.lines
+        .filter((l) => l.daily_demand * 30 < 10)
+        .every((l) => l.qty <= Math.ceil(l.daily_demand * (plan.target_days + l.transit_days)) + 1),
+      plan.lines.filter((l) => l.daily_demand * 30 < 10).map((l) => `${l.offer_id}@${l.cluster_id}:${l.qty}`)
+    ),
+    assert(
+      "supply: отгрузка не превышает собственный склад",
+      [...new Set(plan.lines.map((l) => l.offer_id))].every((id) => {
+        const shipped = plan.lines.filter((l) => l.offer_id === id).reduce((s, l) => s + l.qty, 0);
+        const need = plan.production.find((n) => n.offer_id === id);
+        return !need || shipped === need.own_stock;
+      }),
+      null
+    ),
+    assert(
+      "supply: товар на нуле с готовой партией на своём складе — едет срочно",
+      plan.lines.some((l) => l.offer_id === "AVL-SER-NIAC-30" && l.urgent),
+      plan.lines.filter((l) => l.offer_id === "AVL-SER-NIAC-30").map((l) => `${l.cluster_id}:${l.urgent}`)
+    ),
+    assert(
+      "supply: CSV открывается в Excel — BOM, «;», строка на каждую позицию",
+      (() => {
+        const csv = supplyPlanCsv(plan);
+        return csv.startsWith("﻿") && csv.split("\r\n").filter(Boolean).length === plan.lines.length + 1;
+      })(),
       null
     )
   );

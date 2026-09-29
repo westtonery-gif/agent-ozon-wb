@@ -13,6 +13,7 @@ import {
   type OzonSalesSummary,
 } from "./mock";
 import { dailySeries, type DailyPoint } from "./mock-timeseries";
+import { supplyInputs, type SupplyInputs } from "./mock-clusters";
 
 // Мок включается, если явно задан OZON_MOCK=true,
 // либо если реальные ключи Ozon не заданы (например, на машине разработчика).
@@ -58,6 +59,21 @@ export async function getCardContent(offerId: string): Promise<CardContent | nul
   if (!isMock()) return null;
   const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
   return product ? cardContent(product) : null;
+}
+
+// Входные данные для плана поставок: остаток по кластерам Ozon, доля спроса
+// по кластерам, собственный склад и кратность короба.
+//
+// В живом режиме это три разных источника, и не все из них — Ozon:
+// остаток по складам — Seller API (отчёт об остатках на складах);
+// спрос по кластерам — аналитика с разбивкой по региону (нужно подтвердить
+// на тарифе); собственный склад и кратность короба — учётная система
+// производителя, Ozon о них не знает. Пока всё это не подключено — null,
+// и план поставок честно говорит, чего ему не хватает.
+export async function getSupplyInputs(offerId: string): Promise<SupplyInputs | null> {
+  if (!isMock()) return null;
+  const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
+  return product ? supplyInputs(product) : null;
 }
 
 // Человекочитаемое сообщение по ошибке запроса к Ozon (для страниц и агента).
