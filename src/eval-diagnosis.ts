@@ -1,131 +1,322 @@
-// Offline eval: Ozon and market tools are mocked, LLM synthesis is not called.
-import { runDiagnosis } from "./knowledge/runtime";
-import type { ToolRunner } from "./knowledge/types";
+// Offline eval: инструменты Ozon и рынка замоканы, LLM-синтез не вызывается.
+// Проверяем детерминированный слой — роутер, резолвер, формулы, правила.
+import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
+import type { ToolResult, ToolRunner } from "./knowledge/types";
 
-const stockoutTools: ToolRunner = async (tool) => {
-  if (tool === "get_products")
-    return {
-      tool,
-      state: "ok",
-      data: {
-        products: [
-          {
-            offer_id: "TEST-SKU",
-            name: "Test product",
-            price: 2390,
-            old_price: 3200,
-            stock: 0,
-            orders_30d: 14,
-          },
-        ],
-      },
-    };
-  if (tool === "get_sales_analytics")
-    return { tool, state: "ok", data: { revenue: 50000, orders: 30, sessions: null } };
-  if (tool === "search_competitors") return { tool, state: "ok", data: [] };
-  return { tool, state: "upstream_unavailable", data: null };
-};
+// Строка товара в форме, которую отдаёт get_products (Tool Registry).
+type Row = Record<string, unknown>;
 
-const competitionTools: ToolRunner = async (tool) => {
-  if (tool === "get_products")
-    return {
-      tool,
-      state: "ok",
-      data: {
-        products: [
-          {
-            offer_id: "TEST-SKU",
-            name: "Test product",
-            price: 1000,
-            old_price: 1200,
-            stock: 25,
-            orders_30d: 5,
-            reviews_count: 10,
-          },
-        ],
-      },
-    };
-  if (tool === "get_sales_analytics")
-    return { tool, state: "ok", data: { revenue: 10000, orders: 5, sessions: null } };
-  if (tool === "search_competitors")
-    return {
-      tool,
-      state: "ok",
-      data: [
-        {
-          title: "Competitor product",
-          price: 700,
-          rating: 4.8,
-          reviews_count: 1000,
-          url: "https://www.ozon.ru/mock/competitor",
-        },
-      ],
-    };
-  return { tool, state: "upstream_unavailable", data: null };
-};
+function product(over: Row = {}): Row {
+  return {
+    offer_id: "TEST-SKU",
+    sku: 1,
+    name: "Test product",
+    brand: "TEST",
+    category: "Уход за лицом",
+    price: 1000,
+    old_price: 1200,
+    cost_price: 250,
+    commission_pct: 16,
+    logistics_per_unit: 70,
+    in_promo: false,
+    stock: 100,
+    supply_lead_days: 20,
+    shelf_life_left_days: 600,
+    shelf_life_left_pct: 82,
+    impressions_30d: 20_000,
+    sessions_30d: 1_400,
+    to_cart_30d: 196,
+    orders_30d: 60,
+    ad_spend_30d: 3_000,
+    ad_orders_30d: 15,
+    reviews_count: 300,
+    rating: 4.6,
+    ...over,
+  };
+}
+
+// Инструменты, отдающие заданный набор товаров.
+function toolsFor(rows: Row[]): ToolRunner {
+  return async (tool): Promise<ToolResult> => {
+    if (tool === "get_products") return { tool, state: "ok", data: { products: rows } };
+    if (tool === "get_sales_analytics")
+      return {
+        tool,
+        state: "ok",
+        data: { revenue: 500_000, orders: 400, sessions: 20_000, ad_spend: 60_000, drr: 12 },
+      };
+    if (tool === "search_competitors")
+      return {
+        tool,
+        state: "ok",
+        data: [{ title: "Competitor", price: 700, rating: 4.8, reviews_count: 1000 }],
+      };
+    return { tool, state: "upstream_unavailable", data: null };
+  };
+}
+
+// Инструмент недоступен по правам — метрика должна стать unavailable, не 0.
+const forbiddenTools: ToolRunner = async (tool) => ({
+  tool,
+  state: "forbidden_no_subscription",
+  data: null,
+});
 
 function assert(name: string, cond: boolean, got: unknown) {
-  const mark = cond ? "PASS" : "FAIL";
-  console.log(`${mark}  ${name}${cond ? "" : `  (got: ${JSON.stringify(got)})`}`);
+  console.log(`${cond ? "PASS" : "FAIL"}  ${name}${cond ? "" : `  (got: ${JSON.stringify(got)})`}`);
   return cond;
 }
 
+const INVENTORY = "inventory/stock-replenishment.md";
+const PRICING = "pricing/promo-efficiency.md";
+const TRAFFIC = "traffic/funnel-drop.md";
+
 async function main() {
-  const stockoutSession = await runDiagnosis({
-    question: "Почему товар плохо продается?",
-    productRef: { offer_id: "TEST-SKU" },
-    tools: stockoutTools,
+  const results: boolean[] = [];
+
+  // ── Роутер: вопрос → юнит по keywords самого юнита ──
+  results.push(
+    assert(
+      "router: вопрос про остатки → inventory.stock-replenishment",
+      matchUnits("на сколько хватит остатка?")[0]?.unit.id === "inventory.stock-replenishment",
+      matchUnits("на сколько хватит остатка?")[0]?.unit.id
+    ),
+    assert(
+      "router: вопрос про акцию → pricing.promo-efficiency",
+      matchUnits("выгодна ли акция?")[0]?.unit.id === "pricing.promo-efficiency",
+      matchUnits("выгодна ли акция?")[0]?.unit.id
+    ),
+    assert(
+      "router: вопрос про ДРР → traffic.funnel-drop",
+      matchUnits("какой у меня ДРР?")[0]?.unit.id === "traffic.funnel-drop",
+      matchUnits("какой у меня ДРР?")[0]?.unit.id
+    ),
+    assert(
+      "router: «продается» без ё матчится как «продаётся»",
+      matchUnits("почему товар плохо продается?").length > 0,
+      matchUnits("почему товар плохо продается?").map((m) => m.unit.id)
+    ),
+    assert(
+      "router: вопрос вне компетенции → ни одного юнита",
+      matchUnits("какая завтра погода в москве?").length === 0,
+      matchUnits("какая завтра погода в москве?").map((m) => m.unit.id)
+    )
+  );
+
+  // ── Сток ──
+  const stockout = await runDiagnosis({
+    question: "сток",
+    unitPath: INVENTORY,
+    tools: toolsFor([product({ stock: 0 })]),
   });
+  results.push(
+    assert(
+      "stockout: правило stockout, severity critical",
+      stockout.diagnosis?.matched_rule === "stockout" &&
+        stockout.diagnosis?.severity === "critical",
+      stockout.diagnosis
+    )
+  );
 
-  const competitionSession = await runDiagnosis({
-    question: "Проанализируй мой товар относительно конкурентов",
-    productRef: { offer_id: "TEST-SKU" },
-    tools: competitionTools,
+  // Остатка на 9 дней (30/(100/30)) при сроке поставки 20 → подсортировка опоздала.
+  const overdue = await runDiagnosis({
+    question: "сток",
+    unitPath: INVENTORY,
+    tools: toolsFor([product({ stock: 30, orders_30d: 100, supply_lead_days: 20 })]),
   });
+  results.push(
+    assert(
+      "replenishment_overdue: cover_gap_days < 0",
+      overdue.diagnosis?.matched_rule === "replenishment_overdue",
+      overdue.diagnosis?.matched_rule
+    ),
+    assert(
+      "cover_gap_days посчитан формулой поверх stock_days",
+      overdue.formulas.some(
+        (f) => f.formula_id === "cover_gap_days" && f.status === "known" && f.value === -11
+      ),
+      overdue.formulas.filter((f) => f.formula_id === "cover_gap_days")
+    )
+  );
 
-  console.log("\n-- DiagnosticSession: stockout --");
-  console.log(JSON.stringify(stockoutSession, null, 2));
-  console.log("\n-- DiagnosticSession: competition --");
-  console.log(JSON.stringify(competitionSession, null, 2));
-  console.log("\n-- Assertions --");
+  const expiry = await runDiagnosis({
+    question: "сток",
+    unitPath: INVENTORY,
+    tools: toolsFor([product({ shelf_life_left_pct: 22, shelf_life_left_days: 160 })]),
+  });
+  results.push(
+    assert(
+      "expiry_risk: остаточный срок ниже 40% важнее подсортировки",
+      expiry.diagnosis?.matched_rule === "expiry_risk",
+      expiry.diagnosis?.matched_rule
+    )
+  );
 
-  const results = [
+  const dead = await runDiagnosis({
+    question: "сток",
+    unitPath: INVENTORY,
+    tools: toolsFor([product({ stock: 500, orders_30d: 5 })]),
+  });
+  results.push(
     assert(
-      "stockout: intent -> sales_drop_analysis",
-      stockoutSession.intent.scenario === "sales_drop_analysis",
-      stockoutSession.intent
+      "dead_stock: запас больше 180 дней",
+      dead.diagnosis?.matched_rule === "dead_stock",
+      dead.diagnosis?.matched_rule
+    )
+  );
+
+  // ── Цена и промо ──
+  // 1610 − 1420 − 17% − 108 = −192: акция продаёт в минус.
+  const loss = await runDiagnosis({
+    question: "акция",
+    unitPath: PRICING,
+    tools: toolsFor([
+      product({
+        price: 1610,
+        old_price: 2690,
+        cost_price: 1420,
+        commission_pct: 17,
+        logistics_per_unit: 108,
+        in_promo: true,
+      }),
+    ]),
+  });
+  results.push(
+    assert(
+      "margin_negative: продажа в минус — critical",
+      loss.diagnosis?.matched_rule === "margin_negative" &&
+        loss.diagnosis?.severity === "critical",
+      loss.diagnosis
     ),
     assert(
-      "stockout: primary_unit == inventory.stockout",
-      stockoutSession.diagnosis?.primary_unit === "inventory.stockout",
-      stockoutSession.diagnosis?.primary_unit
-    ),
-    assert("stockout: confidence == high", stockoutSession.confidence === "high", stockoutSession.confidence),
-    assert(
-      "stockout: funnel_stage == availability",
-      stockoutSession.diagnosis?.funnel_stage === "availability",
-      stockoutSession.diagnosis?.funnel_stage
+      "unit_margin = −192 (считает Formula Engine, не модель)",
+      loss.formulas.some((f) => f.formula_id === "unit_margin" && f.value === -192),
+      loss.formulas.filter((f) => f.formula_id === "unit_margin")
     ),
     assert(
-      "stockout: stock_days computed by formula_engine",
-      stockoutSession.formulas.some((f) => f.formula_id === "stock_days" && f.provenance === "formula_engine"),
-      stockoutSession.formulas.map((f) => f.formula_id)
+      "margin_pct посчитан поверх unit_margin (вложенная формула)",
+      loss.formulas.some((f) => f.formula_id === "margin_pct" && f.status === "known"),
+      loss.formulas.filter((f) => f.formula_id === "margin_pct")
+    )
+  );
+
+  // Себестоимости нет → маржа неизвестна, а не ноль.
+  const noCost = await runDiagnosis({
+    question: "акция",
+    unitPath: PRICING,
+    tools: toolsFor([product({ cost_price: null })]),
+  });
+  results.push(
+    assert(
+      "нет себестоимости → unit_margin unknown, а не 0",
+      noCost.formulas.some((f) => f.formula_id === "unit_margin" && f.value === null),
+      noCost.formulas.filter((f) => f.formula_id === "unit_margin")
     ),
     assert(
-      "competition: primary_unit == competition.market-position",
-      competitionSession.diagnosis?.primary_unit === "competition.market-position",
-      competitionSession.diagnosis?.primary_unit
-    ),
-    assert("competition: confidence == medium", competitionSession.confidence === "medium", competitionSession.confidence),
+      "нет себестоимости → правило margin_negative не срабатывает",
+      noCost.diagnosis?.matched_rule !== "margin_negative",
+      noCost.diagnosis?.matched_rule
+    )
+  );
+
+  // ── Воронка и продвижение ──
+  // Маржа 520 (1000 − 250 − 16% − 70), привлечение заказа 1000 → продвижение в минус.
+  const adLoss = await runDiagnosis({
+    question: "продвижение",
+    unitPath: TRAFFIC,
+    tools: toolsFor([product({ ad_spend_30d: 10_000, ad_orders_30d: 10 })]),
+  });
+  results.push(
     assert(
-      "competition: price_vs_market computed",
-      competitionSession.formulas.some((f) => f.formula_id === "price_vs_market" && f.value === 42.86),
-      competitionSession.formulas
+      "ad_unprofitable: CPO выше маржи с единицы",
+      adLoss.diagnosis?.matched_rule === "ad_unprofitable",
+      adLoss.diagnosis?.matched_rule
     ),
-  ];
+    assert(
+      "ad_margin_gap = 520 − 1000 = −480",
+      adLoss.formulas.some((f) => f.formula_id === "ad_margin_gap" && f.value === -480),
+      adLoss.formulas.filter((f) => f.formula_id === "ad_margin_gap")
+    )
+  );
+
+  const ctrLow = await runDiagnosis({
+    question: "воронка",
+    unitPath: TRAFFIC,
+    tools: toolsFor([
+      product({ impressions_30d: 100_000, sessions_30d: 1_500, ad_spend_30d: 0, ad_orders_30d: 0 }),
+    ]),
+  });
+  results.push(
+    assert(
+      "ctr_low: показы есть, в карточку не заходят",
+      ctrLow.diagnosis?.matched_rule === "ctr_low",
+      ctrLow.diagnosis?.matched_rule
+    ),
+    assert(
+      "продвижения не было → cpo unknown, а не 0",
+      ctrLow.formulas.some((f) => f.formula_id === "cpo" && f.value === null),
+      ctrLow.formulas.filter((f) => f.formula_id === "cpo")
+    )
+  );
+
+  // ── Нет доступа к данным ──
+  const forbidden = await runDiagnosis({
+    question: "сток",
+    unitPath: INVENTORY,
+    tools: forbiddenTools,
+  });
+  results.push(
+    assert(
+      "нет доступа → status data_unavailable, диагноза нет",
+      forbidden.status === "data_unavailable" && forbidden.diagnosis?.primary_unit === null,
+      { status: forbidden.status, diagnosis: forbidden.diagnosis?.primary_unit }
+    )
+  );
+
+  // ── Обход ассортимента ──
+  const scan = await runStoreScan({
+    question: "проанализируй магазин",
+    tools: toolsFor([
+      product({ offer_id: "OK-1", name: "Здоровый SKU" }),
+      product({ offer_id: "OUT-1", name: "Нет в наличии", stock: 0 }),
+      product({ offer_id: "DEAD-1", name: "Залежался", stock: 500, orders_30d: 5 }),
+    ]),
+  });
+  results.push(
+    assert(
+      "scan: обошёл все 3 товара",
+      scan.products_scanned === 3,
+      scan.products_scanned
+    ),
+    assert(
+      "scan: здоровый SKU не попал в находки",
+      !scan.findings.some((f) => f.product.offer_id === "OK-1"),
+      scan.findings.map((f) => f.product.offer_id)
+    ),
+    assert(
+      "scan: critical идёт первым",
+      scan.findings[0]?.product.offer_id === "OUT-1" &&
+        scan.findings[0]?.diagnosis.severity === "critical",
+      scan.findings[0]
+    ),
+    assert(
+      "scan: у находки есть доказательная база из метрик правила",
+      (scan.findings[0]?.evidence.length ?? 0) > 0 &&
+        scan.findings[0].evidence.every((m) => m.status === "known"),
+      scan.findings[0]?.evidence
+    ),
+    assert(
+      "scan: кросс-диагностические юниты не дублируют находки",
+      new Set(scan.findings.map((f) => `${f.product.offer_id}:${f.diagnosis.matched_rule}`)).size ===
+        scan.findings.length,
+      scan.findings.map((f) => `${f.product.offer_id}:${f.diagnosis.matched_rule}`)
+    )
+  );
 
   const passed = results.every(Boolean);
-  console.log(`\n${passed ? "EVAL PASSED" : "EVAL FAILED"} (${results.filter(Boolean).length}/${results.length})`);
+  console.log(
+    `\n${passed ? "EVAL PASSED" : "EVAL FAILED"} (${results.filter(Boolean).length}/${results.length})`
+  );
   process.exit(passed ? 0 : 1);
 }
 

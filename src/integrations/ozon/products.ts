@@ -75,10 +75,32 @@ export async function getProductsDetailed(): Promise<OzonProduct[]> {
       offer_id: p.offer_id,
       sku: p.sku,
       name: p.name ?? p.offer_id,
+      // Бренд и категорию Seller API в этом ответе не отдаёт — оставляем unknown.
+      brand: null,
+      category: null,
       price,
       old_price: oldPrice || price,
+      // Себестоимость и условия живут в ERP продавца, а не в Ozon: null = нет данных.
+      // Юнит-экономика без них не считается, и движок честно скажет «нет данных»,
+      // вместо того чтобы подставить ноль и выдать ложную маржу.
+      cost_price: null,
+      commission_pct: null,
+      logistics_per_unit: null,
+      in_promo: null,
       stock,
+      // Лид-тайм производства и дата партии — тоже данные продавца, не Ozon.
+      supply_lead_days: null,
+      produced_at: null,
+      shelf_life_days: null,
+      // Воронка по товару требует отдельного запроса в аналитику с нужными
+      // измерениями; текущий слой отдаёт только заказы. Остальное — unknown.
+      impressions_30d: null,
+      sessions_30d: null,
+      to_cart_30d: null,
       orders_30d: ordersBySku ? ordersBySku[String(p.sku ?? "")] ?? 0 : null,
+      // Продвижение живёт в Performance API (свои ключи, свой OAuth) — не подключён.
+      ad_spend_30d: null,
+      ad_orders_30d: null,
       // Если Ozon не отдаёт отзывы/рейтинг в info — оставляем null (unknown), не 0.
       reviews_count: p.reviews_count ?? null,
       rating: p.rating ?? null,

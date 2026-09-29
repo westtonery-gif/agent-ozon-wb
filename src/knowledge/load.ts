@@ -1,6 +1,6 @@
 // Загрузка Knowledge Core: taxonomy / metrics / formulas / unit-файлы.
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import * as yaml from "js-yaml";
 
 const ROOT = join(process.cwd(), "knowledge");
@@ -50,8 +50,25 @@ export interface KnowledgeUnit {
   diagnosis_rules: DiagnosisRule[];
 }
 
+interface Taxonomy {
+  severity_levels: Record<string, { rank: number; meaning: string }>;
+  confidence_levels: Record<string, { rank: number; meaning: string }>;
+}
+
 let _metrics: Record<string, MetricDef> | null = null;
 let _formulas: Record<string, FormulaDef> | null = null;
+let _taxonomy: Taxonomy | null = null;
+
+export function taxonomy(): Taxonomy {
+  if (!_taxonomy) _taxonomy = loadYaml<Taxonomy>("taxonomy.yaml");
+  return _taxonomy;
+}
+
+// Вес severity для сортировки находок. Единый словарь живёт в taxonomy.yaml,
+// чтобы порядок важности не разъехался между юнитами и кодом.
+export function severityRank(severity: string): number {
+  return taxonomy().severity_levels[severity]?.rank ?? 0;
+}
 
 export function metricsCatalog(): Record<string, MetricDef> {
   if (!_metrics) _metrics = loadYaml<{ metrics: Record<string, MetricDef> }>("metrics.yaml").metrics;
@@ -69,4 +86,30 @@ export function loadUnit(relPath: string): KnowledgeUnit {
   const m = raw.match(/^---\n([\s\S]*?)\n---/);
   if (!m) throw new Error(`Нет фронтматтера в юните: ${relPath}`);
   return yaml.load(m[1]) as KnowledgeUnit;
+}
+
+// Все юниты каталога. Роутер сопоставляет вопрос с их собственными keywords,
+// поэтому новый .md-файл подключается сам — без правок в коде.
+function walk(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) return walk(full);
+    return e.isFile() && e.name.endsWith(".md") ? [full] : [];
+  });
+}
+
+let _units: Array<{ path: string; unit: KnowledgeUnit }> | null = null;
+
+export function listUnits(): Array<{ path: string; unit: KnowledgeUnit }> {
+  if (_units) return _units;
+  const base = join(ROOT, "units");
+  _units = walk(base)
+    .map((full) => {
+      const path = relative(base, full).split(/[\\/]/).join("/");
+      return { path, unit: loadUnit(path) };
+    })
+    // Порядок каталога зависит от файловой системы — фиксируем по id,
+    // чтобы одинаковый вопрос всегда давал одинаковый юнит.
+    .sort((a, b) => a.unit.id.localeCompare(b.unit.id));
+  return _units;
 }

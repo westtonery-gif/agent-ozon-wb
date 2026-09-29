@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
-import { runDiagnosis } from "../../../knowledge/runtime";
-import { synthesize } from "../../../knowledge/synthesize";
-import type { DiagnosticSession, ProductRef } from "../../../knowledge/types";
+import { runDiagnosis, runStoreScan } from "../../../knowledge/runtime";
+import { synthesize, synthesizeScan } from "../../../knowledge/synthesize";
+import type { DiagnosticSession, ProductRef, StoreScan } from "../../../knowledge/types";
 
 type ClientMessage = { role: "user" | "assistant"; content: string };
 
@@ -24,6 +24,28 @@ function latestUserQuestion(body: unknown): string {
     if (lastUser) return lastUser.content;
   }
   return b.message ? String(b.message) : "";
+}
+
+function logStoreScan(scan: StoreScan) {
+  console.log(
+    "[knowledge-runtime] store scan",
+    JSON.stringify(
+      {
+        units_applied: scan.units,
+        products_scanned: scan.products_scanned,
+        findings: scan.findings.map((f) => ({
+          sku: f.product.offer_id,
+          unit: f.unit_id,
+          rule: f.diagnosis.matched_rule,
+          severity: f.diagnosis.severity,
+          evidence: f.evidence.map((m) => `${m.metric_id}=${m.value}`),
+        })),
+        unavailable_metrics: scan.unavailable_metrics,
+      },
+      null,
+      2
+    )
+  );
 }
 
 function logDiagnosticSession(session: DiagnosticSession) {
@@ -91,13 +113,23 @@ export async function POST(req: NextRequest) {
     }
 
     const productRef = extractProductRef(body);
-    const session = await runDiagnosis({ question, productRef });
-    logDiagnosticSession(session);
 
-    const answer =
-      session.status === "no_match"
-        ? "Пока могу выполнить только диагностику продаж по доступным данным магазина. Спросите, например: «Проанализируй мой магазин»."
-        : await synthesize(session);
+    // Назван конкретный товар — разбираем его. Товар не назван — вопрос
+    // менеджера по определению про ассортимент, а не про первую попавшуюся
+    // карточку: идём обходом по всем SKU.
+    let answer: string;
+    if (productRef) {
+      const session = await runDiagnosis({ question, productRef });
+      logDiagnosticSession(session);
+      answer =
+        session.status === "no_match"
+          ? "Не понял, про какую область вопрос. Спросите про сток и подсортировку, цену и промо или воронку и продвижение."
+          : await synthesize(session);
+    } else {
+      const scan = await runStoreScan({ question });
+      logStoreScan(scan);
+      answer = await synthesizeScan(scan);
+    }
 
     return new Response(answer, {
       headers: {

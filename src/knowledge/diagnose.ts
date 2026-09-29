@@ -42,6 +42,13 @@ export function diagnose(unit: KnowledgeUnit, bundle: MetricBundle): Diagnosis {
   for (const rule of rules) {
     const allOk = rule.conditions.every((c) => condOk(c, bundle));
     if (allOk) {
+      // Доказательная база: метрики, названные условиями этого правила
+      // (включая правую часть сравнений вида value_metric).
+      const used = new Set<string>();
+      for (const c of rule.conditions) {
+        used.add(c.metric);
+        if (c.value_metric) used.add(c.value_metric);
+      }
       return {
         matched_rule: rule.id,
         funnel_stage: rule.outcome.funnel_stage,
@@ -49,6 +56,7 @@ export function diagnose(unit: KnowledgeUnit, bundle: MetricBundle): Diagnosis {
         severity: rule.outcome.severity,
         confidence: rule.outcome.confidence,
         findings: [rule.outcome.finding],
+        used_metrics: [...used],
       };
     }
   }
@@ -60,5 +68,6 @@ export function diagnose(unit: KnowledgeUnit, bundle: MetricBundle): Diagnosis {
     severity: "low",
     confidence: "low",
     findings: ["Ни одно правило не сработало."],
+    used_metrics: [],
   };
 }

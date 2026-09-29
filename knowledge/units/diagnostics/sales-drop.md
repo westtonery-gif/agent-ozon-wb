@@ -14,7 +14,7 @@ diagnosis_rules:
       - { metric: stock, op: eq, value: 0 }
     outcome:
       funnel_stage: availability
-      primary_unit: inventory.stockout
+      primary_unit: inventory.stock-replenishment
       severity: critical
       confidence: high
       finding: "Остаток 0 — товар выпал из продажи, это перебивает прочие причины."
@@ -25,7 +25,7 @@ diagnosis_rules:
       - { metric: conversion, op: lt, value: 1.0 }
     outcome:
       funnel_stage: conversion
-      primary_unit: seo.weak-card-content
+      primary_unit: traffic.funnel-drop
       severity: high
       confidence: medium
       finding: "Конверсия ниже порога — трафик есть, проблема в карточке/цене/отзывах."

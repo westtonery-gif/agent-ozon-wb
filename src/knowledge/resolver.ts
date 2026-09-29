@@ -148,17 +148,31 @@ export async function resolveMetrics(
       bundle[id] = resolveBase(id, def);
     }
   }
-  for (const id of needed) {
+  // Глубина зависимости calculated-метрики. Формула может опираться на выход
+  // другой формулы (unit_margin → margin_pct, cpo → ad_margin_gap), поэтому
+  // считаем в порядке возрастания глубины: иначе вход ещё не посчитан и
+  // метрика ложно становится unavailable.
+  const depth = (id: string, seen: Set<string> = new Set()): number => {
     const def = catalog[id];
-    if (def?.source !== "calculated" || !def.formula) continue;
-    const fdef = formulas[def.formula];
+    if (!def || def.source !== "calculated" || seen.has(id)) return 0;
+    const inputs = def.inputs ?? [];
+    return 1 + Math.max(0, ...inputs.map((i) => depth(i, new Set([...seen, id]))));
+  };
+
+  const calculatedIds = [...needed]
+    .filter((id) => catalog[id]?.source === "calculated" && catalog[id]?.formula)
+    .sort((a, b) => depth(a) - depth(b));
+
+  for (const id of calculatedIds) {
+    const def = catalog[id];
+    const fdef = formulas[def.formula!];
     // Выравниваем: имена входов формулы ↔ metric_id из def.inputs по индексу.
     const inputMap: Record<string, MetricResult> = {};
     fdef.inputs.forEach((name, i) => {
       const srcId = def.inputs?.[i];
       if (srcId) inputMap[name] = bundle[srcId];
     });
-    const fr = compute(def.formula, inputMap);
+    const fr = compute(def.formula!, inputMap);
     formulaResults.push(fr);
     bundle[id] = {
       metric_id: id,

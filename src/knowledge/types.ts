@@ -36,6 +36,10 @@ export interface Diagnosis {
   severity: string;
   confidence: string;
   findings: string[];
+  // Метрики, на которые сослались условия сработавшего правила. Это доказательная
+  // база вывода: в ответ уходят только они, чтобы модель не строила выводы
+  // на числах, которых правило не касалось.
+  used_metrics: string[];
 }
 
 // Ссылка на товар. Оба поля опциональны; если нет — runtime берёт первый товар.
@@ -69,6 +73,32 @@ export interface DiagnosticSession {
     | "failed";
   missing_metrics: string[];
   confidence: string;
+}
+
+// ── Обход ассортимента (store scan) ──
+
+export interface ScannedProduct {
+  offer_id: string;
+  name: string;
+  brand: string | null;
+}
+
+export interface ScanFinding {
+  product: ScannedProduct;
+  unit_id: string;
+  diagnosis: Diagnosis;
+  evidence: MetricResult[]; // только метрики сработавшего правила
+}
+
+export interface StoreScan {
+  question: string;
+  scope: "store";
+  units: string[]; // какие юниты применялись
+  products_scanned: number;
+  products: ScannedProduct[];
+  findings: ScanFinding[]; // отсортированы по severity
+  unavailable_metrics: string[]; // чего не хватило и почему вывод может быть неполным
+  status: "complete" | "no_findings" | "needs_metrics" | "data_unavailable";
 }
 
 // Нормализованный результат инструмента (Tool Registry).

@@ -56,6 +56,130 @@ metrics:
     unit: rating
     availability: available
 
+  old_price:
+    name: "Цена до скидки"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: old_price
+    type: number
+    unit: RUB
+    availability: available
+
+  # ── юнит-экономика: данные продавца, а не Ozon (в живом режиме null) ──
+  cost_price:
+    name: "Себестоимость единицы"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: cost_price
+    type: number
+    unit: RUB
+    availability: requires_subscription
+
+  commission_pct:
+    name: "Комиссия площадки"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: commission_pct
+    type: percent
+    unit: "%"
+    availability: requires_subscription
+
+  logistics_per_unit:
+    name: "Логистика и обработка на единицу"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: logistics_per_unit
+    type: number
+    unit: RUB
+    availability: requires_subscription
+
+  # ── сток и производство ──
+  supply_lead_days:
+    name: "Срок производства и поставки"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: supply_lead_days
+    type: number
+    unit: days
+    availability: requires_subscription
+
+  shelf_life_left_days:
+    name: "Остаточный срок годности"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: shelf_life_left_days
+    type: number
+    unit: days
+    availability: requires_subscription
+
+  shelf_life_left_pct:
+    name: "Доля оставшегося срока годности"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: shelf_life_left_pct
+    type: percent
+    unit: "%"
+    availability: requires_subscription
+
+  # ── воронка по товару ──
+  impressions_30d:
+    name: "Показы товара за 30 дней"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: impressions_30d
+    type: number
+    unit: impressions
+    availability: requires_subscription
+
+  sessions_30d:
+    name: "Сессии по товару за 30 дней"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: sessions_30d
+    type: number
+    unit: sessions
+    availability: requires_subscription
+
+  to_cart_30d:
+    name: "Добавлений в корзину за 30 дней"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: to_cart_30d
+    type: number
+    unit: units
+    availability: requires_subscription
+
+  # ── продвижение: в живом режиме нужен Performance API ──
+  ad_spend_30d:
+    name: "Расход на продвижение за 30 дней"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: ad_spend_30d
+    type: number
+    unit: RUB
+    availability: requires_subscription
+
+  ad_orders_30d:
+    name: "Заказов с продвижения за 30 дней"
+    source: seller_api
+    tool: get_products
+    scope: product
+    field: ad_orders_30d
+    type: number
+    unit: orders
+    availability: requires_subscription
+
   # ── из инструмента get_sales_analytics (scope: store) ──
   revenue_30d:
     name: "Выручка магазина за 30 дней"
@@ -144,4 +268,107 @@ metrics:
     inputs: [price, competitor_avg_price]
     type: percent
     unit: "%"
+    availability: derived
+
+  # ── цена и промо ──
+  discount_pct:
+    name: "Глубина скидки от базовой цены"
+    source: calculated
+    formula: discount_pct
+    inputs: [old_price, price]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  unit_margin:
+    name: "Маржа с единицы после комиссии и логистики"
+    source: calculated
+    formula: unit_margin
+    inputs: [price, cost_price, commission_pct, logistics_per_unit]
+    type: number
+    unit: RUB
+    availability: derived
+
+  margin_pct:
+    name: "Маржинальность текущей цены"
+    source: calculated
+    formula: margin_pct
+    inputs: [unit_margin, price]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  # ── сток ──
+  cover_gap_days:
+    name: "Запас минус срок поставки (запас времени на подсортировку)"
+    source: calculated
+    formula: cover_gap_days
+    inputs: [stock_days, supply_lead_days]
+    type: number
+    unit: days
+    availability: derived
+
+  # ── воронка ──
+  ctr:
+    name: "Переход из показа в карточку"
+    source: calculated
+    formula: ctr
+    inputs: [sessions_30d, impressions_30d]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  cart_rate:
+    name: "Добавление в корзину из карточки"
+    source: calculated
+    formula: cart_rate
+    inputs: [to_cart_30d, sessions_30d]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  buyout_rate:
+    name: "Оформление заказа из корзины"
+    source: calculated
+    formula: buyout_rate
+    inputs: [orders_30d, to_cart_30d]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  product_conversion:
+    name: "Конверсия карточки в заказ"
+    source: calculated
+    formula: product_conversion
+    inputs: [orders_30d, sessions_30d]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  # ── продвижение ──
+  cpo:
+    name: "Стоимость заказа с продвижения"
+    source: calculated
+    formula: cpo
+    inputs: [ad_spend_30d, ad_orders_30d]
+    type: number
+    unit: RUB
+    availability: derived
+
+  drr_product:
+    name: "ДРР по товару"
+    source: calculated
+    formula: drr_product
+    inputs: [ad_spend_30d, ad_orders_30d, price]
+    type: percent
+    unit: "%"
+    availability: derived
+
+  ad_margin_gap:
+    name: "Маржа с единицы минус стоимость привлечения заказа"
+    source: calculated
+    formula: ad_margin_gap
+    inputs: [unit_margin, cpo]
+    type: number
+    unit: RUB
     availability: derived

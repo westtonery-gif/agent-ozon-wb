@@ -71,6 +71,8 @@ export async function getSalesSummaryLive(
     avg_check: orders > 0 ? Math.round(revenue / orders) : 0,
     conversion:
       sessions > 0 ? Number(((orders / sessions) * 100).toFixed(1)) : 0,
+    // 0 сессий — это не «ноль посетителей», а «аналитика их не вернула»: unknown.
+    sessions: sessions > 0 ? sessions : null,
     ad_spend: null, // требует Performance API
     drr: null,
   };

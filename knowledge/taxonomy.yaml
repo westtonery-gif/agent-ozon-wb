@@ -19,8 +19,10 @@ problem_types:
 
 categories:
   diagnostics: { title: "Кросс-диагностика", owner_agent: ozonologist }
-  inventory:   { title: "Управление остатками", owner_agent: ozonologist }
-  ranking:     { title: "Ранжирование и видимость", owner_agent: ozonologist }
+  inventory:   { title: "Сток, подсортировка, сроки годности", owner_agent: ozonologist }
+  pricing:     { title: "Цена, промо, юнит-экономика", owner_agent: ozonologist }
+  traffic:     { title: "Воронка и продвижение", owner_agent: ozonologist }
+  competition: { title: "Позиция на рынке", owner_agent: ozonologist }
   seo:         { title: "Контент карточки / SEO", owner_agent: ozonologist }
 
 agents:

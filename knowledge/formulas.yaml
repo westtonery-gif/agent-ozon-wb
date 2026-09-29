@@ -1,5 +1,6 @@
 # Детерминированный слой. LLM запрещено считать эти метрики.
-# MVP: только две формулы.
+# Формулы могут опираться на выходы других формул (unit_margin → margin_pct):
+# Metric Resolver сортирует их по зависимостям перед вычислением.
 version: 1
 
 formulas:
@@ -32,3 +33,113 @@ formulas:
     validation:
       - "if market_avg <= 0 -> null"
       - "round 2"
+
+  # ── цена и промо ──
+
+  discount_pct:
+    description: "Глубина скидки от базовой цены, %"
+    inputs: [old_price, price]
+    output: { id: discount_pct, type: percent, unit: "%" }
+    calculation: "(old_price - price) / old_price * 100"
+    validation:
+      - "if old_price <= 0 -> null"
+      - "if price > old_price -> 0"   # цена выше базовой — скидки нет
+      - "round 1"
+
+  unit_margin:
+    description: "Сколько остаётся с единицы после комиссии и логистики, ₽"
+    inputs: [price, cost_price, commission_pct, logistics_per_unit]
+    output: { id: unit_margin, type: number, unit: RUB }
+    calculation: "price - cost_price - price * commission_pct / 100 - logistics_per_unit"
+    validation:
+      - "любой вход unknown -> null"  # маржа без себестоимости не считается
+      - "round 0"
+
+  margin_pct:
+    description: "Маржинальность текущей цены, %"
+    inputs: [unit_margin, price]
+    output: { id: margin_pct, type: percent, unit: "%" }
+    calculation: "unit_margin / price * 100"
+    validation:
+      - "if price <= 0 -> null"
+      - "round 1"
+
+  # ── сток ──
+
+  cover_gap_days:
+    description: "Запас дней минус срок поставки. Отрицательное = подсортировка опоздала"
+    inputs: [stock_days, supply_lead_days]
+    output: { id: cover_gap_days, type: number, unit: days }
+    calculation: "stock_days - supply_lead_days"
+    validation:
+      - "if stock_days is infinite -> infinite"  # продаж нет, дефицит не грозит
+      - "round 1"
+
+  # ── воронка ──
+
+  ctr:
+    description: "Доля показов, из которых зашли в карточку, %"
+    inputs: [sessions, impressions]
+    output: { id: ctr, type: percent, unit: "%" }
+    calculation: "sessions / impressions * 100"
+    validation:
+      - "if impressions <= 0 -> null"
+      - "round 2"
+
+  cart_rate:
+    description: "Доля сессий с добавлением в корзину, %"
+    inputs: [to_cart, sessions]
+    output: { id: cart_rate, type: percent, unit: "%" }
+    calculation: "to_cart / sessions * 100"
+    validation:
+      - "if sessions <= 0 -> null"
+      - "round 2"
+
+  buyout_rate:
+    description: "Доля корзин, дошедших до заказа, %"
+    inputs: [orders, to_cart]
+    output: { id: buyout_rate, type: percent, unit: "%" }
+    calculation: "orders / to_cart * 100"
+    validation:
+      - "if to_cart <= 0 -> null"
+      - "round 2"
+
+  product_conversion:
+    description: "Конверсия карточки в заказ, %"
+    inputs: [orders, sessions]
+    output: { id: product_conversion, type: percent, unit: "%" }
+    calculation: "orders / sessions * 100"
+    validation:
+      - "if sessions <= 0 -> null"
+      - "round 2"
+
+  # ── продвижение ──
+
+  cpo:
+    description: "Стоимость одного заказа с продвижения, ₽"
+    inputs: [ad_spend, ad_orders]
+    output: { id: cpo, type: number, unit: RUB }
+    calculation: "ad_spend / ad_orders"
+    validation:
+      - "if ad_orders == 0 and ad_spend == 0 -> null"  # продвижения не было
+      - "if ad_orders == 0 and ad_spend > 0 -> infinite"  # платили, заказов нет
+      - "round 0"
+
+  drr_product:
+    description: "Доля рекламных расходов в выручке с продвижения, %"
+    inputs: [ad_spend, ad_orders, price]
+    output: { id: drr_product, type: percent, unit: "%" }
+    calculation: "ad_spend / (ad_orders * price) * 100"
+    validation:
+      - "if ad_orders == 0 and ad_spend == 0 -> null"
+      - "if ad_orders == 0 and ad_spend > 0 -> infinite"
+      - "round 1"
+
+  ad_margin_gap:
+    description: "Маржа с единицы минус стоимость привлечения заказа, ₽. Отрицательное = продвижение работает в минус"
+    inputs: [unit_margin, cpo]
+    output: { id: ad_margin_gap, type: number, unit: RUB }
+    calculation: "unit_margin - cpo"
+    validation:
+      - "if cpo is infinite -> null"  # заказов нет, сравнивать не с чем
+      - "round 0"
