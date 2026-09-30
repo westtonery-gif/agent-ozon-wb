@@ -188,20 +188,28 @@ function checkStock(cur: DailyPoint[]): CheckResult {
 
 // ── Проверка 3. Цена ─────────────────────────────────────────────────────
 function checkPrice(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
-  const priceNow = avg(cur.map((d) => d.price));
+  // Сравниваем цену ДО изменения с ценой СЕЙЧАС, а не средние за периоды:
+  // если цену подняли посреди недели, средняя даст число, по которому товар
+  // никогда не продавался («подняли до 675», когда на деле до 690).
   const priceBefore = avg(prev.map((d) => d.price));
+  const priceNow = cur[cur.length - 1].price;
   const delta = pct(priceNow, priceBefore);
   const raised = (delta ?? 0) >= 5;
+  const changedOn = cur.find((d) => Math.abs((pct(d.price, priceBefore) ?? 0)) >= 5)?.date;
 
   return {
     id: "price",
     order: 3,
     title: "Цена",
     status: raised ? "found" : "not_confirmed",
-    data: `Наша цена ${Math.round(priceBefore)} → ${Math.round(priceNow)} ₽ (${num(delta)}%). Цены конкурентов: нет данных.`,
-    formula: "(средняя цена текущего периода − предыдущего) / предыдущего × 100",
+    data: `Наша цена ${Math.round(priceBefore)} → ${Math.round(priceNow)} ₽ (${num(delta)}%)${
+      changedOn ? `, изменена ${day(changedOn)}` : ""
+    }. Цены конкурентов: нет данных.`,
+    formula: "(цена сейчас − средняя цена предыдущего периода) / средняя × 100",
     conclusion: raised
-      ? `Цену подняли на ${num(delta)}% — это совпадает с падением спроса. Сравнить с рынком нельзя: MPSTATS не подключён, поэтому насколько цена выбилась из ниши — неизвестно.`
+      ? `Цену подняли на ${num(delta)}%, с ${Math.round(priceBefore)} до ${Math.round(priceNow)} ₽${
+          changedOn ? ` (${day(changedOn)})` : ""
+        } — это совпадает с падением спроса. Сравнить с рынком нельзя: MPSTATS не подключён, поэтому насколько цена выбилась из ниши — неизвестно.`
       : `Наша цена практически не менялась (${num(delta)}%). Сравнение с конкурентами недоступно — MPSTATS не подключён, поэтому эту половину проверки закрыть нечем.`,
     source: `${SOURCES.price}; ${SOURCES.market}`,
     weight: raised ? 80 + Math.min(20, Math.abs(delta ?? 0)) : 0,

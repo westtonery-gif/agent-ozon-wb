@@ -12,6 +12,7 @@
     "eval": "tsx src/eval-diagnosis.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0",
     "@types/js-yaml": "^4.0.9",
     "axios": "^1.18.1",
     "dotenv": "^17.4.2",

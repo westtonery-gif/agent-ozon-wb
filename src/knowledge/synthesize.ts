@@ -1,6 +1,7 @@
 // LLM synthesis: превращает готовый диагноз в ответ менеджеру.
 // Модель получает ТОЛЬКО факты (метрики), выходы формул и вывод движка.
 // Запрещено: считать, выдумывать цифры, делать выводы вне diagnosis.
+import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { OZONOLOGIST_DOMAIN, OZONOLOGIST_VOICE } from "../agents/ozonologist";
 import type { SalesDropReport } from "./sales-drop";
@@ -8,17 +9,70 @@ import type { SupplyPlan } from "./supply-plan";
 import { plural } from "./ru";
 import type { DiagnosticSession, StoreScan } from "./types";
 
-// Клиент создаётся при первом вызове, а не при загрузке модуля: иначе
-// `next build` без OPENAI_API_KEY падает на сборе данных страниц, хотя ключ
-// нужен только в рантайме (и сборка на CI/Vercel его обычно не видит).
+// ── Кто пишет ответ ──────────────────────────────────────────────────────
+// Приоритет — Claude. OpenAI остаётся запасным провайдером (с него проект
+// начинался). Без обоих ключей каждый режим отвечает детерминированным
+// рендером: цифры и выводы те же, формулировки шаблонные.
+//
+// Клиенты создаются при первом вызове, а не при загрузке модуля: иначе
+// `next build` без ключа падает на сборе данных страниц.
+const CLAUDE_MODEL = "claude-opus-5-5";
+let _anthropic: Anthropic | null = null;
 let _openai: OpenAI | null = null;
 
-function client(): OpenAI {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("Не задан OPENAI_API_KEY — ответ сформулировать нечем.");
+async function complete(system: string, messages: Turn[]): Promise<string> {
+  // Диалог обязан начинаться с реплики пользователя.
+  const first = messages.findIndex((m) => m.role === "user");
+  const convo = first < 0 ? [] : messages.slice(first);
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    _anthropic ??= new Anthropic();
+    const response = await _anthropic.beta.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 16000,
+      // Opus 5.5 думает всегда; глубину задаёт effort. По умолчанию у этой
+      // модели medium — задаём явно, чтобы поведение не менялось вслед за API.
+      output_config: { effort: "medium" },
+      // Если классификатор откажет, запрос сам переедет на рекомендованную
+      // модель внутри того же вызова, а не вернёт пустой отказ.
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      system,
+      messages: convo,
+    });
+    if (response.stop_reason === "refusal")
+      throw new Error("модель отказалась отвечать");
+    const text = response.content
+      .flatMap((b) => (b.type === "text" ? [b.text] : []))
+      .join("")
+      .trim();
+    console.log(
+      `[synthesis] ${response.model}: ${response.usage.input_tokens} вх / ${response.usage.output_tokens} исх токенов`,
+    );
+    if (!text) throw new Error("пустой ответ модели");
+    return text;
   }
-  if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return _openai;
+
+  if (process.env.OPENAI_API_KEY) {
+    _openai ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const completion = await _openai.chat.completions.create({
+      model: "gpt-5.5",
+      messages: [{ role: "system", content: system }, ...convo],
+    });
+    const text = completion.choices[0].message.content?.trim();
+    if (!text) throw new Error("пустой ответ модели");
+    return text;
+  }
+
+  throw new Error("нет ключа ни Anthropic, ни OpenAI");
+}
+
+// Модель недоступна — отвечаем детерминированно, но причину пишем в лог
+// сервера. Иначе неверный ключ выглядел бы как «агент стал глупым».
+function fallbackNotice(err: unknown) {
+  console.warn(
+    `[synthesis] модель недоступна, запасной ответ: ${(err as Error)?.message ?? err}`,
+  );
 }
 
 const RULES = `
@@ -81,37 +135,41 @@ ${RULES}
 export async function synthesize(session: DiagnosticSession): Promise<string> {
   if (session.status === "data_unavailable") {
     return `Недостаточно данных для диагноза. Недоступны метрики: ${session.missing_metrics.join(
-      ", "
+      ", ",
     )}. Подключи их (подписка/аналитика), тогда дам вывод.`;
   }
 
   const facts = {
     diagnosis: session.diagnosis,
-    metrics: session.metrics.map((m) => ({ id: m.metric_id, value: m.value, status: m.status })),
-    formulas: session.formulas.map((f) => ({ id: f.formula_id, value: f.value, status: f.status })),
+    metrics: session.metrics.map((m) => ({
+      id: m.metric_id,
+      value: m.value,
+      status: m.status,
+    })),
+    formulas: session.formulas.map((f) => ({
+      id: f.formula_id,
+      value: f.value,
+      status: f.status,
+    })),
     confidence: session.confidence,
   };
 
-  const completion = await client().chat.completions.create({
-    model: "gpt-5.5",
-    messages: [
-      { role: "system", content: SINGLE_SYSTEM },
-      {
-        role: "user",
-        content: `Вопрос: ${session.question}\n\nДИАГНОЗ (JSON):\n${JSON.stringify(
-          facts,
-          null,
-          2
-        )}\n\nСформулируй ответ менеджеру.`,
-      },
-    ],
-  });
-
-  return completion.choices[0].message.content ?? "";
+  return complete(SINGLE_SYSTEM, [
+    {
+      role: "user",
+      content: `Вопрос: ${session.question}\n\nДИАГНОЗ (JSON):\n${JSON.stringify(
+        facts,
+        null,
+        2,
+      )}\n\nСформулируй ответ менеджеру.`,
+    },
+  ]);
 }
 
 const k = (n: number) =>
-  n >= 10_000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1).replace(".", ",")} тыс. ₽` : `${n} ₽`;
+  n >= 10_000
+    ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1).replace(".", ",")} тыс. ₽`
+    : `${n} ₽`;
 
 // Запасной рендер обхода: закономерности, потом то, что в них не вошло.
 export function renderScan(scan: StoreScan, detail = false): string {
@@ -124,33 +182,41 @@ export function renderScan(scan: StoreScan, detail = false): string {
         scan.patterns.length,
         "закономерность",
         "закономерности",
-        "закономерностей"
-      )}:`
+        "закономерностей",
+      )}:`,
     );
     for (const p of scan.patterns) {
       const money = [
         p.money.frozen_rub ? `заморожено ${k(p.money.frozen_rub)}` : null,
-        p.money.lost_margin_rub ? `недополучим ${k(p.money.lost_margin_rub)} маржи` : null,
-        p.money.monthly_loss_rub ? `теряем ${k(p.money.monthly_loss_rub)} в месяц` : null,
+        p.money.lost_margin_rub
+          ? `недополучим ${k(p.money.lost_margin_rub)} маржи`
+          : null,
+        p.money.monthly_loss_rub
+          ? `теряем ${k(p.money.monthly_loss_rub)} в месяц`
+          : null,
       ].filter(Boolean);
       lines.push(
         "",
         detail
           ? `**${p.title}** (${p.owner}${money.length ? `, ${money.join(", ")}` : ""}). ${p.finding} ${p.hypothesis} ${p.action}`
-          : `**${p.title}.** ${p.headline} ${p.hypothesis} ${p.action}`
+          : `**${p.title}.** ${p.headline} ${p.hypothesis} ${p.action}`,
       );
     }
   }
 
   const rest = scan.findings.filter(
-    (f) => !covered.has(f.product.offer_id) && f.diagnosis.severity === "critical"
+    (f) =>
+      !covered.has(f.product.offer_id) && f.diagnosis.severity === "critical",
   );
   if (rest.length) {
     lines.push("", "Отдельно, вне закономерностей:");
-    for (const f of rest) lines.push(`- ${f.product.name}: ${f.diagnosis.findings[0]}`);
+    for (const f of rest)
+      lines.push(`- ${f.product.name}: ${f.diagnosis.findings[0]}`);
   }
   if (!lines.length) {
-    lines.push(`Проверил ${scan.products_scanned} SKU — отклонений, требующих действия, нет.`);
+    lines.push(
+      `Проверил ${scan.products_scanned} SKU — отклонений, требующих действия, нет.`,
+    );
   }
   lines.push("", "_Данные тестовые._");
   return lines.join("\n");
@@ -159,7 +225,7 @@ export function renderScan(scan: StoreScan, detail = false): string {
 export async function synthesizeScan(
   scan: StoreScan,
   history: Turn[] = [],
-  detail = false
+  detail = false,
 ): Promise<string> {
   if (scan.status === "data_unavailable") {
     return "Не удалось получить данные магазина — ответ был бы догадкой. Проверьте доступ к Ozon и повторите.";
@@ -198,24 +264,20 @@ export async function synthesizeScan(
   };
 
   try {
-    const completion = await client().chat.completions.create({
-      model: "gpt-5.5",
-      messages: [
-        { role: "system", content: SCAN_SYSTEM },
-        ...recent(history),
-        {
-          role: "user",
-          content: `${detail ? "Просят подробности — разверни каждую закономерность с цифрами по SKU.\n\n" : ""}Вопрос: ${scan.question}\n\nОТЧЁТ ДВИЖКА (JSON, только отсюда бери цифры):\n${JSON.stringify(
-            facts,
-            null,
-            2
-          )}`,
-        },
-      ],
-    });
-    return completion.choices[0].message.content ?? renderScan(scan, detail);
-  } catch {
+    return await complete(SCAN_SYSTEM, [
+      ...recent(history),
+      {
+        role: "user",
+        content: `${detail ? "Просят подробности — разверни каждую закономерность с цифрами по SKU.\n\n" : ""}Вопрос: ${scan.question}\n\nОТЧЁТ ДВИЖКА (JSON, только отсюда бери цифры):\n${JSON.stringify(
+          facts,
+          null,
+          2,
+        )}`,
+      },
+    ]);
+  } catch (err) {
     // Нет ключа, упал прокси, лимит — ответ всё равно должен быть.
+    fallbackNotice(err);
     return renderScan(scan, detail);
   }
 }
@@ -286,7 +348,8 @@ const PRIMARY_LEAD: Record<string, string> = {
 // поэтому здесь задача скромнее: связные фразы вместо подписанных полей.
 // Основной ответ пишет модель — см. synthesizeSalesDrop.
 export function renderSalesDrop(r: SalesDropReport, detail = false): string {
-  if (r.status === "unknown_sku") return `Не нашёл товар ${r.offer_id} в кабинете.`;
+  if (r.status === "unknown_sku")
+    return `Не нашёл товар ${r.offer_id} в кабинете.`;
   if (r.status === "no_series")
     return `По ${r.offer_id} нет истории продаж за период — сравнивать нечего. Нужны дневные данные аналитики.`;
 
@@ -297,11 +360,13 @@ export function renderSalesDrop(r: SalesDropReport, detail = false): string {
   lines.push(
     r.is_drop
       ? `${r.name}: заказы упали с ${d.orders_before} до ${d.orders_now} за неделю, выручка — с ${Math.round(
-          d.revenue_before
-        ).toLocaleString("ru-RU")} до ${Math.round(d.revenue_now).toLocaleString("ru-RU")} ₽${
+          d.revenue_before,
+        ).toLocaleString(
+          "ru-RU",
+        )} до ${Math.round(d.revenue_now).toLocaleString("ru-RU")} ₽${
           d.started_on ? `. Началось ${day(d.started_on)}` : ""
         }.`
-      : `${r.name}: заказы держатся — ${d.orders_before} на прошлой неделе, ${d.orders_now} на этой. Падения нет.`
+      : `${r.name}: заказы держатся — ${d.orders_before} на прошлой неделе, ${d.orders_now} на этой. Падения нет.`,
   );
 
   // Причину называем только когда есть что объяснять. Без падения «главная
@@ -315,8 +380,8 @@ export function renderSalesDrop(r: SalesDropReport, detail = false): string {
           observations.length,
           "есть замечание",
           "есть замечания",
-          "есть замечаний"
-        )} по товару — скажите «подробнее».`
+          "есть замечаний",
+        )} по товару — скажите «подробнее».`,
       );
     }
   } else if (r.primary) {
@@ -324,29 +389,49 @@ export function renderSalesDrop(r: SalesDropReport, detail = false): string {
     const tail = r.primary.recheck_days
       ? ` Через ${r.primary.recheck_days} дн. стоит проверить, помогло ли.`
       : "";
-    lines.push(`Похоже на ${PRIMARY_LEAD[r.primary.id] ?? r.primary.title.toLowerCase()}. ${r.primary.conclusion}`);
+    lines.push(
+      `Похоже на ${PRIMARY_LEAD[r.primary.id] ?? r.primary.title.toLowerCase()}. ${r.primary.conclusion}`,
+    );
     if (r.primary.action) lines.push(`${r.primary.action}${tail}`);
     else if (tail) lines.push(tail.trim());
   } else {
-    lines.push("Ни одна из восьми проверок причину не подтвердила — падение есть, а объяснения в данных нет.");
+    lines.push(
+      "Ни одна из восьми проверок причину не подтвердила — падение есть, а объяснения в данных нет.",
+    );
   }
 
   if (detail) {
     lines.push("", "Все проверки:");
     for (const c of r.checks) {
       const mark =
-        c.status === "found" ? "причина найдена" : c.status === "not_confirmed" ? "не подтверждена" : "нет данных";
-      lines.push(`${c.order}. ${c.title} — ${mark}. ${c.data}. ${c.conclusion} [${c.source}]`);
+        c.status === "found"
+          ? "причина найдена"
+          : c.status === "not_confirmed"
+            ? "не подтверждена"
+            : "нет данных";
+      lines.push(
+        `${c.order}. ${c.title} — ${mark}. ${c.data}. ${c.conclusion} [${c.source}]`,
+      );
     }
   } else if (r.is_drop) {
     const tail: string[] = [];
     if (r.others.length)
       tail.push(
-        plural(r.others.length, "возможная причина", "возможные причины", "возможных причин")
+        plural(
+          r.others.length,
+          "возможная причина",
+          "возможные причины",
+          "возможных причин",
+        ),
       );
     if (r.no_data.length)
       tail.push(
-        plural(r.no_data.length, "проверка без данных", "проверки без данных", "проверок без данных")
+        plural(
+          r.no_data.length,
+          "проверка без данных",
+          "проверки без данных",
+          "проверок без данных",
+        ),
       );
     if (tail.length) lines.push(`Там ещё ${tail.join(" и ")} — сказать?`);
   }
@@ -374,14 +459,18 @@ function recent(history: Turn[] = [], limit = 6) {
 export async function synthesizeSalesDrop(
   r: SalesDropReport,
   detail = false,
-  history: Turn[] = []
+  history: Turn[] = [],
 ): Promise<string> {
   if (r.status !== "ok") return renderSalesDrop(r, detail);
 
   const facts = {
     sku: r.offer_id,
     name: r.name,
-    period: { days: r.period_days, current: r.current_range, previous: r.previous_range },
+    period: {
+      days: r.period_days,
+      current: r.current_range,
+      previous: r.previous_range,
+    },
     drop: r.drop,
     primary: r.primary,
     others_count: r.others.length,
@@ -391,26 +480,24 @@ export async function synthesizeSalesDrop(
   };
 
   try {
-    const completion = await client().chat.completions.create({
-      model: "gpt-5.5",
-      messages: [
-        { role: "system", content: DROP_SYSTEM },
-        ...recent(history),
-        {
-          role: "user",
-          content: `${
-            detail ? "Просят подробности — разверни." : "Ответь коротко, как коллега."
-          }\n\nОТЧЁТ ДВИЖКА (JSON, только отсюда бери цифры):\n${JSON.stringify(
-            facts,
-            null,
-            2
-          )}`,
-        },
-      ],
-    });
-    return completion.choices[0].message.content ?? renderSalesDrop(r, detail);
-  } catch {
+    return await complete(DROP_SYSTEM, [
+      ...recent(history),
+      {
+        role: "user",
+        content: `${
+          detail
+            ? "Просят подробности — разверни."
+            : "Ответь коротко, как коллега."
+        }\n\nОТЧЁТ ДВИЖКА (JSON, только отсюда бери цифры):\n${JSON.stringify(
+          facts,
+          null,
+          2,
+        )}`,
+      },
+    ]);
+  } catch (err) {
     // Ключа нет, прокси упал, лимит — ответ всё равно должен быть.
+    fallbackNotice(err);
     return renderSalesDrop(r, detail);
   }
 }
@@ -461,7 +548,9 @@ export function renderSupplyPlan(plan: SupplyPlan): string {
   const lines: string[] = [];
   lines.push(
     `На ближайшую поставку — ${t.units.toLocaleString("ru-RU")} шт по ${t.skus} товарам в ${t.clusters} кластеров.` +
-      (t.urgent ? ` В ${t.urgent} позициях товар уже на нуле или кончится раньше, чем доедет.` : "")
+      (t.urgent
+        ? ` В ${t.urgent} позициях товар уже на нуле или кончится раньше, чем доедет.`
+        : ""),
   );
   // by_cluster отсортирован по срочности; «больше всего» — это про объём.
   const top = [...plan.by_cluster]
@@ -472,7 +561,9 @@ export function renderSupplyPlan(plan: SupplyPlan): string {
   for (const n of plan.production) {
     lines.push(
       `${n.name}: своего склада ${n.own_stock} шт, не хватает ещё ${n.shortfall}` +
-        (n.lead_days ? ` — это партия в производство с циклом ${n.lead_days} дн.` : ".")
+        (n.lead_days
+          ? ` — это партия в производство с циклом ${n.lead_days} дн.`
+          : "."),
     );
   }
   lines.push("[Скачать запрос на отгрузку (CSV)](/api/supply-plan)");
@@ -480,8 +571,12 @@ export function renderSupplyPlan(plan: SupplyPlan): string {
   return lines.join("\n");
 }
 
-export async function synthesizeSupplyPlan(plan: SupplyPlan, history: Turn[] = []): Promise<string> {
-  if (!plan.lines.length && !plan.production.length) return renderSupplyPlan(plan);
+export async function synthesizeSupplyPlan(
+  plan: SupplyPlan,
+  history: Turn[] = [],
+): Promise<string> {
+  if (!plan.lines.length && !plan.production.length)
+    return renderSupplyPlan(plan);
 
   const facts = {
     target_days: plan.target_days,
@@ -505,21 +600,17 @@ export async function synthesizeSupplyPlan(plan: SupplyPlan, history: Turn[] = [
   };
 
   try {
-    const completion = await client().chat.completions.create({
-      model: "gpt-5.5",
-      messages: [
-        { role: "system", content: SUPPLY_SYSTEM },
-        ...recent(history),
-        {
-          role: "user",
-          content: `Ответь коротко, как коллега.\n\nПЛАН (JSON, только отсюда бери цифры):\n${JSON.stringify(facts, null, 2)}`,
-        },
-      ],
-    });
-    const text = completion.choices[0].message.content;
+    const text = await complete(SUPPLY_SYSTEM, [
+      ...recent(history),
+      {
+        role: "user",
+        content: `Ответь коротко, как коллега.\n\nПЛАН (JSON, только отсюда бери цифры):\n${JSON.stringify(facts, null, 2)}`,
+      },
+    ]);
     // Ссылку на файл добавляем сами: модель не должна её выдумывать или терять.
-    return text ? `${text}\n\n[Скачать запрос на отгрузку (CSV)](/api/supply-plan)` : renderSupplyPlan(plan);
-  } catch {
+    return `${text}\n\n[Скачать запрос на отгрузку (CSV)](/api/supply-plan)`;
+  } catch (err) {
+    fallbackNotice(err);
     return renderSupplyPlan(plan);
   }
 }

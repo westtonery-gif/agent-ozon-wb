@@ -339,6 +339,17 @@ async function main() {
     );
   }
 
+  // Цена сравнивается «до изменения → сейчас», а не средними за периоды:
+  // средняя за неделю со сменой цены даёт число, по которому товар не продавался.
+  const priceCheck = (await diagnoseSalesDrop("ORT-LIP-MAT-04", 7)).checks.find((c) => c.id === "price");
+  results.push(
+    assert(
+      "drop: рост цены назван реальными ценами (585 → 690), а не средней за неделю",
+      !!priceCheck?.conclusion.includes("с 585 до 690"),
+      priceCheck?.conclusion
+    )
+  );
+
   const control = await diagnoseSalesDrop("ORT-MAS-VOL-10", 7);
   results.push(
     assert(
