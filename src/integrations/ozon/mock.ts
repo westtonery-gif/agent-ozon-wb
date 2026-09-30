@@ -353,6 +353,36 @@ export const MOCK_PRODUCTS: OzonProduct[] = [
     rating: 4.4,
   },
 
+  {
+    offer_id: "AVL-SER-RETI-30",
+    sku: 1400110,
+    name: "AVELINA Сыворотка с ретинолом 0,3%, 30 мл",
+    brand: "AVELINA",
+    category: "Уход за лицом",
+    // Недооценённый товар: ниша около 1700 ₽, а мы продаём за 690. Смотрят
+    // охотно (CTR 6%), но в корзину кладут мало, хотя рейтинг хороший, —
+    // ретинол за такие деньги выглядит подозрительно. И реклама в минус:
+    // заказ с неё стоит дороже, чем остаётся маржи.
+    price: 690,
+    old_price: 890,
+    cost_price: 260,
+    commission_pct: 16,
+    logistics_per_unit: 72,
+    in_promo: false,
+    stock: 60,
+    supply_lead_days: 21,
+    produced_at: daysAgo(60),
+    shelf_life_days: 540,
+    impressions_30d: 21_000,
+    sessions_30d: 1_260,
+    to_cart_30d: 60,
+    orders_30d: 14,
+    ad_spend_30d: 4_200,
+    ad_orders_30d: 6,
+    reviews_count: 38,
+    rating: 4.5,
+  },
+
   // ─────────────────────── ORTIKA — декоративная косметика ───────────────────
   {
     offer_id: "ORT-LIP-MAT-01",
@@ -759,11 +789,11 @@ export interface OzonSalesSummary {
 
 export const MOCK_SALES: OzonSalesSummary = {
   period_days: 30,
-  orders: 1_025,
-  revenue: 1_313_330,
-  avg_check: 1_281,
+  orders: 1_039,
+  revenue: 1_322_990,
+  avg_check: 1_273,
   conversion: 2.4,
   sessions: 42_100,
-  ad_spend: 94_750,
-  drr: 7.2,
+  ad_spend: 98_950,
+  drr: 7.5,
 };

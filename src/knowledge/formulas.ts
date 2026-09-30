@@ -193,6 +193,40 @@ export function compute(formulaId: string, inputs: Inputs): FormulaResult {
       return result(formulaId, Math.round(margin - cpo), "known", inputs);
     }
 
+    // ── тест цены ──
+    case "price_test_breakeven": {
+      const price = num(inputs.price);
+      const test = num(inputs.test_price);
+      const cost = num(inputs.cost_price);
+      const commission = num(inputs.commission_pct);
+      const logistics = num(inputs.logistics_per_unit);
+      const status = inheritStatus(
+        inputs.price,
+        inputs.test_price,
+        inputs.cost_price,
+        inputs.commission_pct,
+        inputs.logistics_per_unit
+      );
+      if (
+        status !== "known" ||
+        price === null ||
+        test === null ||
+        cost === null ||
+        commission === null ||
+        logistics === null
+      )
+        return result(formulaId, null, status, inputs);
+      // Ниша не дороже нас — поднимать цену до неё бессмысленно.
+      if (test <= price) return result(formulaId, null, "unknown", inputs);
+      const margin = (x: number) => x - cost - (x * commission) / 100 - logistics;
+      const now = margin(price);
+      const atTest = margin(test);
+      if (atTest <= 0) return result(formulaId, null, "unknown", inputs);
+      // Сейчас каждая продажа в минус: по новой цене выгодна любая.
+      if (now <= 0) return result(formulaId, 0, "known", inputs);
+      return result(formulaId, Math.round((now / atTest) * 100), "known", inputs);
+    }
+
     default:
       return result(formulaId, null, "unknown", inputs);
   }

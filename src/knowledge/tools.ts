@@ -1,35 +1,8 @@
 // Tool Registry — ЕДИНСТВЕННАЯ граница с Ozon. Возвращает нормализованные данные
 // и состояние (ToolErrorState). Никто выше в стек Ozon-клиент не импортирует.
-import { getProducts, getSalesSummary } from "../integrations/ozon/store";
+import { getMarket, getProducts, getSalesSummary } from "../integrations/ozon/store";
 import { modelOf, shelfLifeLeftDays, shelfLifeLeftPct } from "../integrations/ozon/mock";
 import type { ToolResult, ToolErrorState, ToolContext, ToolRunner } from "./types";
-
-// Заглушка внешнего рынка. Реальный источник (MPStat / Moneyplace / парсер выдачи)
-// подключается здесь и больше нигде — остальной стек о нём не знает.
-// Пока источника нет, эти цифры честно помечены как external_market и v1-заглушка.
-const MOCK_COMPETITORS = [
-  {
-    title: "Сыворотка с ниацинамидом 10%, 30 мл",
-    price: 1_090,
-    rating: 4.6,
-    reviews_count: 2_140,
-    url: "https://www.ozon.ru/mock/competitor-1",
-  },
-  {
-    title: "Сыворотка для лица ниацинамид + цинк, 30 мл",
-    price: 1_290,
-    rating: 4.7,
-    reviews_count: 1_780,
-    url: "https://www.ozon.ru/mock/competitor-2",
-  },
-  {
-    title: "Сыворотка-концентрат для сужения пор, 30 мл",
-    price: 940,
-    rating: 4.5,
-    reviews_count: 3_260,
-    url: "https://www.ozon.ru/mock/competitor-3",
-  },
-];
 
 function classify(e: unknown): ToolErrorState {
   const status = (e as { response?: { status?: number } })?.response?.status;
@@ -88,12 +61,13 @@ async function get_products(): Promise<ToolResult> {
 // Принимает контекст товара (title/category/price) — реальный источник будет
 // искать по нему. Пока возвращает mock (реальный поиск НЕ подключаем на этом шаге).
 async function search_competitors(context?: ToolContext): Promise<ToolResult> {
-  void context; // TODO: сюда подключится реальный источник конкурентов
-  return {
-    tool: "search_competitors",
-    state: "ok",
-    data: MOCK_COMPETITORS,
-  };
+  // Внешний рынок подключается здесь и больше нигде. Пока источника нет,
+  // в живом режиме отвечаем «нет доступа» — метрики рынка становятся
+  // unavailable, и ни одно правило не сработает на выдуманных конкурентах.
+  if (!context?.offer_id) return { tool: "search_competitors", state: "empty", data: [] };
+  const market = await getMarket(context.offer_id);
+  if (!market) return { tool: "search_competitors", state: "forbidden_no_subscription", data: null };
+  return { tool: "search_competitors", state: market.length ? "ok" : "empty", data: market };
 }
 
 async function get_sales_analytics(): Promise<ToolResult> {

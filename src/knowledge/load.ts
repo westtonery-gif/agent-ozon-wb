@@ -14,7 +14,7 @@ export interface MetricDef {
   tool?: string;
   scope?: "product" | "store";
   field?: string;
-  aggregation?: "avg";
+  aggregation?: "avg" | "min";
   formula?: string;
   inputs?: string[];
   type: string;

@@ -242,6 +242,16 @@ metrics:
     unit: reviews
     availability: available
 
+  market_low_price:
+    name: "Нижняя граница цены ниши (минимальная у сопоставимых карточек)"
+    source: external_market
+    tool: search_competitors
+    field: price
+    aggregation: min
+    type: number
+    unit: RUB
+    availability: available
+
   # ── calculated (считает Formula Engine, НЕ LLM) ──
   conversion:
     name: "Конверсия магазина в заказ"
@@ -371,4 +381,13 @@ metrics:
     inputs: [unit_margin, cpo]
     type: number
     unit: RUB
+    availability: derived
+
+  price_test_breakeven:
+    name: "Какую долю заказов достаточно сохранить при цене нижней границы ниши"
+    source: calculated
+    formula: price_test_breakeven
+    inputs: [price, market_low_price, cost_price, commission_pct, logistics_per_unit]
+    type: percent
+    unit: "%"
     availability: derived

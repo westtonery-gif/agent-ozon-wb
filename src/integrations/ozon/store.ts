@@ -14,6 +14,7 @@ import {
 } from "./mock";
 import { dailySeries, type DailyPoint } from "./mock-timeseries";
 import { supplyInputs, type SupplyInputs } from "./mock-clusters";
+import { marketFor, type Competitor } from "./mock-market";
 
 // Мок включается, если явно задан OZON_MOCK=true,
 // либо если реальные ключи Ozon не заданы (например, на машине разработчика).
@@ -74,6 +75,15 @@ export async function getSupplyInputs(offerId: string): Promise<SupplyInputs | n
   if (!isMock()) return null;
   const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
   return product ? supplyInputs(product) : null;
+}
+
+// Сопоставимые карточки конкурентов. В живом режиме это внешний источник —
+// MPSTATS, Moneyplace или индекс цен Ozon — и он не подключён, поэтому null:
+// сравнение с рынком честно «нет данных», а не выдуманные конкуренты.
+export async function getMarket(offerId: string): Promise<Competitor[] | null> {
+  if (!isMock()) return null;
+  const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
+  return product ? marketFor(product) : null;
 }
 
 // Человекочитаемое сообщение по ошибке запроса к Ozon (для страниц и агента).

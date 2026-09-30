@@ -143,3 +143,20 @@ formulas:
     validation:
       - "if cpo is infinite -> null"  # заказов нет, сравнивать не с чем
       - "round 0"
+
+  # ── тест цены ──
+
+  price_test_breakeven:
+    description: >
+      Какую долю текущих заказов достаточно сохранить при цене нижней границы
+      ниши, чтобы маржа в день не упала. 28% значит: даже если заказов станет
+      в 3,5 раза меньше, заработаем столько же. Главная цифра для решения о
+      тесте цены — она показывает, сколько права на ошибку у теста.
+    inputs: [price, test_price, cost_price, commission_pct, logistics_per_unit]
+    output: { id: price_test_breakeven, type: percent, unit: "%" }
+    calculation: "margin(price) / margin(test_price) * 100, margin(x) = x - cost - x*commission/100 - logistics"
+    validation:
+      - "if test_price <= price -> null"      # тестировать нечего: ниша не дороже
+      - "if margin(test_price) <= 0 -> null"
+      - "if margin(price) <= 0 -> 0"          # сейчас в минус — любая продажа по новой цене лучше
+      - "round 0"

@@ -100,7 +100,24 @@ const RULES = `
 - Русский язык.
 ${OZONOLOGIST_VOICE}`;
 
-const SINGLE_SYSTEM = `${OZONOLOGIST_DOMAIN}\n${RULES}`;
+const SINGLE_SYSTEM = `${OZONOLOGIST_DOMAIN}
+${RULES}
+
+ВОПРОС ПРО ОДИН ТОВАР
+
+Движок применил к товару правила по теме вопроса и отдал диагноз с
+доказательной базой. Ответь на то, что спросили, опираясь на него.
+
+Если вывод — поднять цену, это всегда тест, а не ответ: тот же подъём, что
+помогает одному товару, другому обваливает продажи, и заранее этого не знает
+никто. Назови, до какой цены (нижняя граница ниши, market_low_price), на
+какой срок и как мерить успех — маржой в день, а не числом заказов. Цифру
+price_test_breakeven скажи по-человечески: «даже если сохранится только N%
+заказов, заработаем столько же» — это главный довод, сколько у теста права
+на ошибку. Сам ничего не пересчитывай.
+
+Если правило не сработало (primary_unit = null) — скажи, что признаков
+проблемы по этой теме нет, и коротко на каких цифрах это видно.`;
 
 const SCAN_SYSTEM = `${OZONOLOGIST_DOMAIN}
 ${RULES}
@@ -144,38 +161,61 @@ ${RULES}
   Есть ещё перекос остатков в Москву, но он дешевле — рассказать?
 `;
 
-export async function synthesize(session: DiagnosticSession): Promise<string> {
+// Запасной рендер одиночного разбора: вывод правила и его доказательная база.
+export function renderSession(session: DiagnosticSession): string {
+  const d = session.diagnosis;
+  if (!d) return "Не понял, про какую область вопрос.";
+  const used = new Set(d.used_metrics);
+  const evidence = session.metrics
+    .filter((m) => used.has(m.metric_id) && m.status === "known")
+    .map((m) => `${m.metric_id} = ${m.value}`);
+  return (
+    `${d.findings[0]}${evidence.length ? `\n\nЦифры: ${evidence.join(", ")}.` : ""}` +
+    mockNote()
+  );
+}
+
+export async function synthesize(
+  session: DiagnosticSession,
+  history: Turn[] = [],
+): Promise<string> {
   if (session.status === "data_unavailable") {
-    return `Недостаточно данных для диагноза. Недоступны метрики: ${session.missing_metrics.join(
+    return `Недостаточно данных для вывода. Недоступны: ${session.missing_metrics.join(
       ", ",
-    )}. Подключи их (подписка/аналитика), тогда дам вывод.`;
+    )}. Подключите их, тогда дам ответ.`;
   }
 
+  const used = new Set(session.diagnosis?.used_metrics ?? []);
   const facts = {
     diagnosis: session.diagnosis,
-    metrics: session.metrics.map((m) => ({
-      id: m.metric_id,
-      value: m.value,
-      status: m.status,
-    })),
-    formulas: session.formulas.map((f) => ({
-      id: f.formula_id,
-      value: f.value,
-      status: f.status,
-    })),
+    // Доказательная база — метрики, на которых сработало правило.
+    evidence: session.metrics
+      .filter((m) => used.has(m.metric_id))
+      .map((m) => ({ id: m.metric_id, value: m.value, status: m.status })),
+    other_metrics: session.metrics
+      .filter((m) => !used.has(m.metric_id))
+      .map((m) => ({ id: m.metric_id, value: m.value, status: m.status })),
     confidence: session.confidence,
   };
 
-  return complete(SINGLE_SYSTEM, [
-    {
-      role: "user",
-      content: `Вопрос: ${session.question}\n\nДИАГНОЗ (JSON):\n${JSON.stringify(
-        facts,
-        null,
-        2,
-      )}\n\nСформулируй ответ менеджеру.`,
-    },
-  ]);
+  try {
+    return (
+      (await complete(SINGLE_SYSTEM, [
+        ...recent(history),
+        {
+          role: "user",
+          content: `Вопрос: ${session.question}\n\nОТЧЁТ ДВИЖКА (JSON, только отсюда бери цифры):\n${JSON.stringify(
+            facts,
+            null,
+            2,
+          )}`,
+        },
+      ])) + mockNote()
+    );
+  } catch (err) {
+    fallbackNotice(err);
+    return renderSession(session);
+  }
 }
 
 const k = (n: number) =>

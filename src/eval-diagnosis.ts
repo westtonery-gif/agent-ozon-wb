@@ -610,6 +610,83 @@ async function main() {
     );
   }
 
+  // ── Цена слишком низкая ──
+  // Случай из практики: БАД за 700 ₽ продавался плохо, за 2000 ₽ — пошёл.
+  // В моке его аналог — сыворотка с ретинолом за 690 ₽ при нише ~1700 ₽.
+  const PRICE_LOW = "pricing/price-too-low.md";
+  results.push(
+    assert(
+      "price-low: «стоит ли поднять цену?» → юнит заниженной цены",
+      matchUnits("стоит ли поднять цену?")[0]?.unit.id === "pricing.price-too-low",
+      matchUnits("стоит ли поднять цену?").map((m) => m.unit.id)
+    )
+  );
+  const reti = await runDiagnosis({
+    question: "цена",
+    unitPath: PRICE_LOW,
+    productRef: { offer_id: "AVL-SER-RETI-30" },
+  });
+  results.push(
+    assert(
+      "price-low: ретинол — дешевле ниши и реклама в минус → нельзя растить при такой цене",
+      reti.diagnosis?.matched_rule === "underpriced_cant_promote",
+      reti.diagnosis?.matched_rule
+    ),
+    assert(
+      "price-low: при цене нижней границы ниши достаточно сохранить 28% заказов",
+      reti.formulas.some((f) => f.formula_id === "price_test_breakeven" && f.value === 28),
+      reti.formulas.filter((f) => f.formula_id === "price_test_breakeven")
+    ),
+    assert(
+      "price-low: в доказательной базе есть сами цены — наша и нижняя граница ниши",
+      ["price", "market_low_price", "price_test_breakeven"].every((id) =>
+        reti.diagnosis?.used_metrics.includes(id)
+      ),
+      reti.diagnosis?.used_metrics
+    )
+  );
+
+  // Ложное «поднимите цену» опаснее, чем никакого: из 25 SKU срабатывает
+  // только тот, где это заложено.
+  const priceScan = await runStoreScan({ question: "где мы продаём слишком дёшево?", limit: 50 });
+  results.push(
+    assert(
+      "price-low: по всему ассортименту — только ретинол, без ложных срабатываний",
+      priceScan.findings.length === 1 && priceScan.findings[0].product.offer_id === "AVL-SER-RETI-30",
+      priceScan.findings.map((f) => `${f.product.offer_id}:${f.diagnosis.matched_rule}`)
+    )
+  );
+
+  // У каждого товара — своя ниша: палетку больше не сравнивают с сыворотками.
+  const palette = await runDiagnosis({
+    question: "цена",
+    unitPath: PRICE_LOW,
+    productRef: { offer_id: "ORT-EYE-PAL-12" },
+  });
+  const pvm = palette.metrics.find((m) => m.metric_id === "price_vs_market")?.value;
+  results.push(
+    assert(
+      "market: палетка сравнивается со своей нишей (±25%), а не с сыворотками",
+      typeof pvm === "number" && Math.abs(pvm) <= 25,
+      pvm
+    )
+  );
+
+  // Без внешнего рынка (живой режим, MPSTATS нет) рекомендовать подъём
+  // цены нельзя — но и молчать нельзя: сказать, что выбрать не из чего.
+  const noMarket: ToolRunner = async (tool, context) =>
+    tool === "search_competitors"
+      ? { tool, state: "forbidden_no_subscription", data: null }
+      : toolsFor([product({ ad_spend_30d: 10_000, ad_orders_30d: 10 })])(tool, context);
+  const blind = await runDiagnosis({ question: "цена", unitPath: PRICE_LOW, tools: noMarket });
+  results.push(
+    assert(
+      "price-low: без цен ниши — не «поднимите цену», а «выбрать не из чего»",
+      blind.diagnosis?.matched_rule === "margin_cant_fund_ads",
+      blind.diagnosis?.matched_rule
+    )
+  );
+
   const passed = results.every(Boolean);
   console.log(
     `\n${passed ? "EVAL PASSED" : "EVAL FAILED"} (${results.filter(Boolean).length}/${results.length})`

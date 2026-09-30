@@ -116,14 +116,16 @@ export async function resolveMetrics(
 
     const data = tr.data as Record<string, unknown> | Array<Record<string, unknown>> | null;
     let raw: unknown;
-    if (Array.isArray(data) && def.aggregation === "avg") {
+    if (Array.isArray(data) && (def.aggregation === "avg" || def.aggregation === "min")) {
       const nums = data
         .map((row) => row[def.field ?? ""])
         .filter((v): v is number => typeof v === "number");
       raw =
-        nums.length > 0
-          ? Number((nums.reduce((sum, v) => sum + v, 0) / nums.length).toFixed(2))
-          : null;
+        nums.length === 0
+          ? null
+          : def.aggregation === "min"
+            ? Math.min(...nums)
+            : Number((nums.reduce((sum, v) => sum + v, 0) / nums.length).toFixed(2));
     } else if (def.scope === "product" && !Array.isArray(data)) {
       const list = (data?.products as Array<Record<string, unknown>>) ?? [];
       const row = pickProduct(list, opts.productRef);
