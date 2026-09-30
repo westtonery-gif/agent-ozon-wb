@@ -147,7 +147,7 @@ export function compute(formulaId: string, inputs: Inputs): FormulaResult {
       return share(formulaId, "sessions", "impressions", inputs);
     case "cart_rate":
       return share(formulaId, "to_cart", "sessions", inputs);
-    case "buyout_rate":
+    case "cart_to_order_rate":
       return share(formulaId, "orders", "to_cart", inputs);
     case "product_conversion":
       return share(formulaId, "orders", "sessions", inputs);

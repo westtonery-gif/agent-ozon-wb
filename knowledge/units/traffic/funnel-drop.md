@@ -31,7 +31,7 @@ required_metrics:
     orders_30d,
     ctr,
     cart_rate,
-    buyout_rate,
+    cart_to_order_rate,
     product_conversion,
     ad_spend_30d,
     ad_orders_30d,
@@ -89,14 +89,14 @@ diagnosis_rules:
       confidence: high
       finding: "В карточку заходят, но не кладут в корзину. Отваливается на содержании карточки: состав, объём, фото, описание, цена относительно ожидания."
 
-  - id: buyout_low
+  - id: cart_to_order_low
     priority: 50
     conditions:
-      - { metric: buyout_rate, op: not_null }
+      - { metric: cart_to_order_rate, op: not_null }
       # Порог откалиброван по фактическому распределению кабинета: норма
       # 30-38%, поэтому 22% — это выброс, а не «чуть ниже среднего».
       # Правило, срабатывающее на трети ассортимента, диагностикой не является.
-      - { metric: buyout_rate, op: lt, value: 22 }
+      - { metric: cart_to_order_rate, op: lt, value: 22 }
     outcome:
       funnel_stage: cart_to_order
       primary_unit: traffic.funnel-drop
@@ -138,7 +138,7 @@ diagnosis_rules:
 - показы < 1000 — товара нет в выдаче;
 - `ctr < 3%` — видят, но не заходят;
 - `cart_rate < 8%` — заходят, но не кладут;
-- `buyout_rate < 22%` — кладут, но не покупают;
+- `cart_to_order_rate < 22%` — кладут, но не покупают;
 - `ad_margin_gap < 0` — заказ с продвижения дороже собственной маржи.
 
 ## required_metrics
@@ -166,5 +166,5 @@ ad_spend_30d, ad_orders_30d, cpo, drr_product, ad_margin_gap.
 - `no_visibility` → категория, характеристики, запросы в заголовке;
 - `ctr_low` → главное фото и цена в выдаче, это единственное, что видит покупатель до клика;
 - `cart_low` → содержание карточки: состав, объём, назначение, фото «до/после», рич-контент;
-- `buyout_low` → цена относительно соседей, срок доставки, отзывы и рейтинг;
+- `cart_to_order_low` → цена относительно соседей, срок доставки, отзывы и рейтинг;
 - `drr_high` → перераспределить бюджет на SKU с большей маржой.

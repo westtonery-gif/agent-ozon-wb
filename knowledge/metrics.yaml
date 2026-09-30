@@ -337,10 +337,13 @@ metrics:
     unit: "%"
     availability: derived
 
-  buyout_rate:
+  # Не путать с «процентом выкупа» маркетплейса (доставлено / заказано):
+  # здесь доля корзин, дошедших до оформления заказа. Выкуп и возвраты
+  # агент пока не считает.
+  cart_to_order_rate:
     name: "Оформление заказа из корзины"
     source: calculated
-    formula: buyout_rate
+    formula: cart_to_order_rate
     inputs: [orders_30d, to_cart_30d]
     type: percent
     unit: "%"

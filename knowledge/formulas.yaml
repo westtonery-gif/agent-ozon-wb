@@ -95,10 +95,10 @@ formulas:
       - "if sessions <= 0 -> null"
       - "round 2"
 
-  buyout_rate:
+  cart_to_order_rate:
     description: "Доля корзин, дошедших до заказа, %"
     inputs: [orders, to_cart]
-    output: { id: buyout_rate, type: percent, unit: "%" }
+    output: { id: cart_to_order_rate, type: percent, unit: "%" }
     calculation: "orders / to_cart * 100"
     validation:
       - "if to_cart <= 0 -> null"
