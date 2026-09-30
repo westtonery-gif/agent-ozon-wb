@@ -3,12 +3,17 @@ import { matchUnits, runDiagnosis, runStoreScan } from "../../../knowledge/runti
 import { diagnoseSalesDrop } from "../../../knowledge/sales-drop";
 import { planSupply } from "../../../knowledge/supply-plan";
 import { followUps, recordRecommendation, type RecKind } from "../../../knowledge/journal";
+import { reviewReport, storeReviewReports } from "../../../knowledge/reviews";
+import { detectPatterns } from "../../../knowledge/patterns";
+import { resolveMetrics } from "../../../knowledge/resolver";
+import type { PriceContext } from "../../../knowledge/synthesize";
 import {
   synthesize,
   synthesizeSalesDrop,
   synthesizeScan,
   synthesizeSupplyPlan,
   synthesizeJournal,
+  synthesizeReviews,
 } from "../../../knowledge/synthesize";
 import { getProducts } from "../../../integrations/ozon/store";
 import type { DiagnosticSession, ProductRef, StoreScan } from "../../../knowledge/types";
@@ -59,6 +64,9 @@ const DROP_RE =
 // «сработала ли акция?» — вопрос про промо, и ни то ни другое не про журнал.
 const JOURNAL_RE =
   /(прошл\S*|наш\S*|тво\S*|мо[иих]\S*) (совет|рекомендац)|(совет|рекомендац)\S*[^.?!]{0,30}(сработал|помогл|выполнил|сделал)|(сработал|помогл|выполнил)\S*[^.?!]{0,30}(совет|рекомендац)|что с (прошл|совет|рекомендац)|журнал|что (ты |мы )?советовал/i;
+
+// Вопрос про отзывы: о чём жалуются, чей это процесс.
+const REVIEWS_RE = /отзыв|жалоб|жалуют|негатив|что пишут/i;
 
 // Запись совета в журнал не должна ломать ответ: не записалось — не беда,
 // ответ человек всё равно получит.
@@ -218,6 +226,34 @@ export async function POST(req: NextRequest) {
     if (JOURNAL_RE.test(question)) {
       // Что советовали и что из этого вышло — по данным, а не по памяти.
       answer = await synthesizeJournal(await followUps(), dialogue);
+    } else if (REVIEWS_RE.test(question) && !DROP_RE.test(question)) {
+      // О чём жалуются: по одному товару или по всему магазину. Во втором
+      // случае — ещё и одинаковые жалобы у разных товаров (это процесс).
+      const reports = offerId
+        ? [await reviewReport(offerId)].filter((r) => r !== null)
+        : await storeReviewReports();
+      const patterns = offerId
+        ? []
+        : (await detectPatterns()).filter((p) => p.id === "review_theme");
+      console.log(
+        "[reviews]",
+        JSON.stringify(reports.map((r) => `${r.sku}:${r.top?.theme ?? "-"}(${r.classified_by})`))
+      );
+      // «Подозрительно дёшево» проверяется ценой против ниши — передаём её.
+      const priceContext: PriceContext = {};
+      for (const r of reports) {
+        if (!r.themes.some((t) => t.theme === "fake_suspicion")) continue;
+        const { bundle } = await resolveMetrics(["price", "market_low_price", "price_vs_market"], {
+          productRef: { offer_id: r.sku },
+        });
+        const v = (id: string) => (typeof bundle[id]?.value === "number" ? (bundle[id].value as number) : null);
+        priceContext[r.sku] = {
+          price: v("price"),
+          market_low_price: v("market_low_price"),
+          price_vs_market: v("price_vs_market"),
+        };
+      }
+      answer = await synthesizeReviews(reports, patterns, question, dialogue, priceContext);
     } else if (SUPPLY_RE.test(question)) {
       // План поставок: что, куда и сколько везти. Назван артикул — по нему,
       // нет — по всему ассортименту.

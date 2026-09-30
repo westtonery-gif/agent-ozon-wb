@@ -18,6 +18,7 @@
 import { getSupplyInputs } from "../integrations/ozon/store";
 import { resolveMetrics } from "./resolver";
 import { plural } from "./ru";
+import { reviewReport, THEMES, THEME_ACTIONS, type ReviewReport, type ThemeId } from "./reviews";
 import { memoizeTools, realToolRunner } from "./tools";
 import type { MetricBundle, ToolRunner } from "./types";
 
@@ -25,7 +26,8 @@ export type PatternId =
   | "line_imbalance"
   | "promo_ads_stacking"
   | "regional_gap"
-  | "overstock_capital";
+  | "overstock_capital"
+  | "review_theme";
 
 export interface Pattern {
   id: PatternId;
@@ -378,6 +380,48 @@ function overstockCapital(rows: Row[], covered: Set<string>): Pattern[] {
   ];
 }
 
+// ── 5. Одна жалоба у нескольких товаров ──────────────────────────────────
+// Румяна бьются при доставке — это проблема румян. Румяна и палетка бьются
+// обе — это проблема упаковки компактных продуктов, и чинить надо процесс,
+// а не два товара по отдельности.
+async function reviewTheme(rows: Row[]): Promise<Pattern[]> {
+  const reports: ReviewReport[] = [];
+  for (const r of rows) {
+    const rep = await reviewReport(r.offer_id);
+    if (rep?.top) reports.push(rep);
+  }
+  const byTheme = new Map<ThemeId, ReviewReport[]>();
+  for (const rep of reports) byTheme.set(rep.top!.theme, [...(byTheme.get(rep.top!.theme) ?? []), rep]);
+
+  const out: Pattern[] = [];
+  for (const [theme, list] of byTheme) {
+    if (list.length < 2) continue;
+    const t = THEMES[theme];
+    out.push({
+      id: "review_theme",
+      title: `Одна жалоба у нескольких товаров: ${t.title}`,
+      owner: t.owner,
+      skus: list.map((r) => r.sku),
+      facts: list.map((r) => ({
+        sku: r.sku,
+        name: r.name,
+        complaints: r.top!.count,
+        negative: r.negative,
+        quote: r.top!.quotes[0] ?? null,
+      })),
+      money: { frozen_rub: null, lost_margin_rub: null, monthly_loss_rub: null },
+      headline: `${plural(list.length, "товар", "товара", "товаров")} с одной и той же главной жалобой — «${t.title}».`,
+      finding:
+        list
+          .map((r) => `${r.name}: ${r.top!.count} из ${r.negative} негативных — «${r.top!.quotes[0]}»`)
+          .join("; ") + ".",
+      hypothesis: `Похоже, это не проблема отдельных товаров, а процесса: ${t.process}.`,
+      action: THEME_ACTIONS[theme],
+    });
+  }
+  return out;
+}
+
 // ── Оркестрация ──────────────────────────────────────────────────────────
 
 // Деньги разной природы: заморожено — один раз, теряется в месяц — каждый месяц.
@@ -412,6 +456,7 @@ export async function detectPatterns(opts: { tools?: ToolRunner } = {}): Promise
     ...promoAdsStacking(rows),
     ...(await regionalGap(rows)),
     ...overstockCapital(rows, covered),
+    ...(await reviewTheme(rows)),
   ];
 
   // Сначала то, что стоит больше денег; без рублей — по числу затронутых SKU.

@@ -15,6 +15,7 @@ import {
 import { dailySeries, type DailyPoint } from "./mock-timeseries";
 import { supplyInputs, type SupplyInputs } from "./mock-clusters";
 import { marketFor, type Competitor } from "./mock-market";
+import { reviewsFor, type Review } from "./mock-reviews";
 
 // Мок включается, если явно задан OZON_MOCK=true,
 // либо если реальные ключи Ozon не заданы (например, на машине разработчика).
@@ -84,6 +85,14 @@ export async function getMarket(offerId: string): Promise<Competitor[] | null> {
   if (!isMock()) return null;
   const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
   return product ? marketFor(product) : null;
+}
+
+// Тексты отзывов за последние 60 дней. В живом режиме — Seller API
+// (/v1/review/list, нужна подписка Premium Plus); не проверено, поэтому null.
+export async function getReviews(offerId: string): Promise<Review[] | null> {
+  if (!isMock()) return null;
+  const product = MOCK_PRODUCTS.find((p) => p.offer_id === offerId);
+  return product ? reviewsFor(product) : null;
 }
 
 // Человекочитаемое сообщение по ошибке запроса к Ozon (для страниц и агента).

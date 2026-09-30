@@ -4,6 +4,7 @@ import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
 import { diagnoseSalesDrop } from "./knowledge/sales-drop";
 import { planSupply, supplyPlanCsv } from "./knowledge/supply-plan";
 import { detectPatterns } from "./knowledge/patterns";
+import { reviewReport, THEME_ACTIONS } from "./knowledge/reviews";
 import { evaluate, followUps, recordRecommendation, type JournalEntry } from "./knowledge/journal";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
@@ -81,6 +82,9 @@ const PRICING = "pricing/promo-efficiency.md";
 const TRAFFIC = "traffic/funnel-drop.md";
 
 async function main() {
+  // Эвал — без модели и без сети: отзывы разбираются по словам, даже если
+  // в окружении случайно оказался ключ.
+  delete process.env.ANTHROPIC_API_KEY;
   const results: boolean[] = [];
 
   // ── Роутер: вопрос → юнит по keywords самого юнита ──
@@ -818,6 +822,67 @@ async function main() {
     )
   );
   rmSync(process.env.OZON_JOURNAL_PATH, { force: true });
+
+  // ── Отзывы ──
+  const blush = await reviewReport("ORT-BLS-PWD-05");
+  const pal = await reviewReport("ORT-EYE-PAL-12");
+  const vitc = await reviewReport("AVL-SER-VITC-30");
+  const coral = await reviewReport("ORT-LIP-MAT-07");
+  const retinol = await reviewReport("AVL-SER-RETI-30");
+  results.push(
+    assert(
+      "reviews: румяна — главная жалоба «разбитые при доставке», 9 из 14 → логистика",
+      blush?.top?.theme === "damaged_in_transit" && blush.top.count === 9 && blush.negative === 14 && blush.top.owner === "логистика",
+      blush?.top && { theme: blush.top.theme, count: blush.top.count, negative: blush.negative }
+    ),
+    assert(
+      "reviews: витамин C — «окислилось, старая партия» → склад",
+      vitc?.top?.theme === "expired_oxidized" && vitc.top.owner === "склад",
+      vitc?.top?.theme
+    ),
+    assert(
+      "reviews: Coral — «цвет не как на фото» → контент, а не «оттенок не продаётся»",
+      coral?.top?.theme === "shade_mismatch" && coral.top.owner === "контент",
+      coral?.top?.theme
+    ),
+    assert(
+      "reviews: две-три жалобы — не тренд: у ретинола главной темы нет",
+      retinol?.top === null && retinol.themes.some((t) => t.theme === "fake_suspicion"),
+      retinol && { top: retinol.top, themes: retinol.themes.map((t) => `${t.theme}:${t.count}`) }
+    ),
+    assert(
+      "reviews: у товаров с фоновым негативом главной темы нет",
+      (await reviewReport("AVL-CLN-GEL-150"))?.top == null,
+      (await reviewReport("AVL-CLN-GEL-150"))?.top
+    )
+  );
+
+  const reviewPatterns = (await detectPatterns()).filter((p) => p.id === "review_theme");
+  results.push(
+    assert(
+      "reviews: румяна и палетка бьются обе — закономерность упаковки, а не двух товаров",
+      reviewPatterns.length === 1 &&
+        ["ORT-BLS-PWD-05", "ORT-EYE-PAL-12"].every((id) => reviewPatterns[0].skus.includes(id)) &&
+        reviewPatterns[0].owner === "логистика",
+      reviewPatterns.map((p) => ({ title: p.title, skus: p.skus }))
+    ),
+    assert(
+      "reviews: у палетки тоже главная жалоба — разбитые (4 из 5)",
+      pal?.top?.theme === "damaged_in_transit" && pal.top.count === 4,
+      pal?.top && { theme: pal.top.theme, count: pal.top.count }
+    )
+  );
+
+  // Диагностика падения больше не говорит «прочитайте отзывы» — называет мотив.
+  const blushDrop = await diagnoseSalesDrop("ORT-BLS-PWD-05", 7);
+  const reviewsCheck = blushDrop.checks.find((c) => c.id === "reviews");
+  results.push(
+    assert(
+      "reviews: падение румян — в проверке отзывов названа главная жалоба и действие логистике",
+      !!reviewsCheck?.conclusion.includes("разбит") && reviewsCheck.action === THEME_ACTIONS.damaged_in_transit,
+      { conclusion: reviewsCheck?.conclusion, action: reviewsCheck?.action }
+    )
+  );
 
   const passed = results.every(Boolean);
   console.log(

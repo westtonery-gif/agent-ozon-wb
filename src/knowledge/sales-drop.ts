@@ -11,6 +11,7 @@
 
 import { getCardContent, getProducts, getSkuDaily, isMock } from "../integrations/ozon/store";
 import type { DailyPoint } from "../integrations/ozon/mock-timeseries";
+import { reviewReport, THEME_ACTIONS, type ReviewReport } from "./reviews";
 
 export type CheckStatus = "found" | "not_confirmed" | "no_data";
 
@@ -263,7 +264,7 @@ function checkPosition(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
 }
 
 // ── Проверка 5. Рейтинг и отзывы ─────────────────────────────────────────
-function checkReviews(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
+function checkReviews(cur: DailyPoint[], prev: DailyPoint[], report: ReviewReport | null): CheckResult {
   const ratingsNow = cur.map((d) => d.rating).filter((r): r is number => r !== null);
   const ratingsBefore = prev.map((d) => d.rating).filter((r): r is number => r !== null);
   if (!ratingsNow.length || !ratingsBefore.length) {
@@ -280,22 +281,36 @@ function checkReviews(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
   const negatives = sum(cur.map((d) => d.reviews_negative_new ?? 0));
   const dropped = rBefore - rNow >= 0.2 || negatives >= 3;
 
+  // О чём негатив — прочитано в отзывах (модель относит отзыв к теме, код
+  // считает). Раньше здесь стояло «прочитать отзывы и найти общий мотив» —
+  // теперь агент делает это сам.
+  const top = report?.top ?? null;
+  const motive = top
+    ? ` Главная жалоба — «${top.title}»: ${top.count} из ${report!.negative} негативных, например: «${top.quotes[0]}». Это ${top.process} — вопрос к отделу «${top.owner}».`
+    : report && report.negative
+      ? " Общей причины в отзывах нет — жалобы разные."
+      : "";
+
   return {
     id: "reviews",
     order: 5,
     title: "Рейтинг и отзывы",
     status: dropped ? "found" : "not_confirmed",
-    data: `Рейтинг ${rBefore.toFixed(1)} → ${rNow.toFixed(1)}, новых отзывов с оценкой ≤ 3: ${negatives}`,
+    data: `Рейтинг ${rBefore.toFixed(1)} → ${rNow.toFixed(1)}, новых отзывов с оценкой ≤ 3: ${negatives}${
+      top ? `; главная жалоба: ${top.title} (${top.count} из ${report!.negative})` : ""
+    }`,
     formula: "средний рейтинг за период; сумма новых отзывов с оценкой ≤ 3",
     conclusion: dropped
       ? `Рейтинг просел на ${(rBefore - rNow).toFixed(
           1
-        )} и пришло ${negatives} негативных отзывов — в косметике это бьёт по конверсии сразу.`
+        )} и пришло ${negatives} негативных отзывов — в косметике это бьёт по конверсии сразу.${motive}`
       : `Рейтинг стабилен (${rBefore.toFixed(1)} → ${rNow.toFixed(1)}), негатива нет.`,
     source: SOURCES.reviews,
     weight: dropped ? 60 + negatives * 2 : 0,
     action: dropped
-      ? "Прочитать негативные отзывы и найти общий мотив: брак партии, несоответствие описанию, повреждение при доставке. Ответить на каждый."
+      ? top
+        ? THEME_ACTIONS[top.theme]
+        : "Ответить на каждый негативный отзыв: общей причины в них нет."
       : null,
     recheck_days: dropped ? 14 : null,
   };
@@ -441,7 +456,7 @@ export async function diagnoseSalesDrop(
     checkStock(cur),
     checkPrice(cur, prev),
     checkPosition(cur, prev),
-    checkReviews(cur, prev),
+    checkReviews(cur, prev, await reviewReport(product.offer_id)),
     checkCompetitors(),
     checkAds(cur, prev),
     checkContent(content),

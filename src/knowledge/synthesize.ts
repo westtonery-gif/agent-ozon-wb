@@ -7,6 +7,8 @@ import { OZONOLOGIST_DOMAIN, OZONOLOGIST_VOICE } from "../agents/ozonologist";
 import type { SalesDropReport } from "./sales-drop";
 import type { SupplyPlan } from "./supply-plan";
 import type { FollowUp } from "./journal";
+import { THEME_ACTIONS, type ReviewReport } from "./reviews";
+import type { Pattern } from "./patterns";
 import { plural } from "./ru";
 import { isMock } from "../integrations/ozon/store";
 import type { DiagnosticSession, StoreScan } from "./types";
@@ -781,5 +783,96 @@ export async function synthesizeJournal(items: FollowUp[], history: Turn[] = [])
   } catch (err) {
     fallbackNotice(err);
     return renderJournal(items);
+  }
+}
+
+// ── Отзывы ───────────────────────────────────────────────────────────────
+
+const REVIEWS_SYSTEM = `${OZONOLOGIST_DOMAIN}
+${RULES}
+
+ОТЗЫВЫ
+
+Движок прочитал негативные отзывы (оценка 3 и ниже), отнёс каждый к одной
+теме и посчитал темы. Расскажи, на что жалуются, — но не пересказывай отзывы,
+а переводи их в процессы: тема → чей это процесс → что сделать.
+
+- Начни с того, где у жалобы есть главная тема (top): это уже не шум, а
+  причина. Если одна и та же тема у нескольких товаров (review_patterns) —
+  это проблема процесса, скажи это первым.
+- Цитируй коротко — одну фразу покупателя, чтобы было видно, что это реальные
+  слова, а не твой пересказ.
+- Две-три жалобы — не тренд. Если top нет, скажи, что общей причины нет.
+- Если тема подтверждает то, что видно в цифрах (например, «подозрительно
+  дёшево» при цене намного ниже ниши), — свяжи их.
+- price_context — наша цена против ниши. Если его нет у товара, это значит
+  только, что его не запрашивали, — не делай вывод «сравнить не с чем».
+- classified_by = keywords значит, что отзывы разобраны по словам, без модели:
+  упомяни, что разбор грубый.`;
+
+// Цена против ниши — для товаров с жалобой «подозрение на подделку»: иначе
+// модель не может связать «подозрительно дёшево» с тем, что видно в цифрах, и
+// делает вывод из отсутствия данных («сравнить не с чем»), хотя сравнить есть с чем.
+export type PriceContext = Record<
+  string,
+  { price: number | null; market_low_price: number | null; price_vs_market: number | null }
+>;
+
+function reviewFact(r: ReviewReport, priceContext: PriceContext = {}) {
+  return {
+    price_context: priceContext[r.sku] ?? undefined,
+    sku: r.sku,
+    name: r.name,
+    reviews_60d: r.total,
+    negative: r.negative,
+    top: r.top && { ...r.top, action: THEME_ACTIONS[r.top.theme] },
+    themes: r.themes.map((t) => ({ theme: t.title, count: t.count, share: t.share, owner: t.owner, quotes: t.quotes })),
+    classified_by: r.classified_by,
+  };
+}
+
+export function renderReviews(reports: ReviewReport[], patterns: Pattern[]): string {
+  if (!reports.length) return "Негативных отзывов нет или они недоступны (в живом режиме нужна подписка Premium Plus)." + mockNote();
+  const lines: string[] = [];
+  for (const p of patterns) lines.push(`**${p.title}.** ${p.headline} ${p.hypothesis} ${p.action}`, "");
+  for (const r of reports) {
+    lines.push(
+      r.top
+        ? `${r.name}: главная жалоба — «${r.top.title}» (${r.top.count} из ${r.negative}), например: «${r.top.quotes[0]}». ${THEME_ACTIONS[r.top.theme]}`
+        : `${r.name}: ${r.negative} негативных, общей причины нет.`,
+    );
+  }
+  if (reports.some((r) => r.classified_by === "keywords")) lines.push("", "_Отзывы разобраны по ключевым словам, без модели — разбор грубый._");
+  return lines.join("\n") + mockNote();
+}
+
+export async function synthesizeReviews(
+  reports: ReviewReport[],
+  patterns: Pattern[],
+  question: string,
+  history: Turn[] = [],
+  priceContext: PriceContext = {},
+): Promise<string> {
+  if (!reports.length) return renderReviews(reports, patterns);
+  try {
+    return (
+      (await complete(REVIEWS_SYSTEM, [
+        ...recent(history),
+        {
+          role: "user",
+          content: `Вопрос: ${question}\n\nОТЗЫВЫ (JSON, только отсюда бери цифры и цитаты):\n${JSON.stringify(
+            {
+              review_patterns: patterns.map((p) => ({ title: p.title, owner: p.owner, skus: p.skus, finding: p.finding, hypothesis: p.hypothesis, action: p.action })),
+              products: reports.map((r) => reviewFact(r, priceContext)),
+            },
+            null,
+            2,
+          )}`,
+        },
+      ])) + mockNote()
+    );
+  } catch (err) {
+    fallbackNotice(err);
+    return renderReviews(reports, patterns);
   }
 }
