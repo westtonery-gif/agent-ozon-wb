@@ -4,6 +4,10 @@ import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
 import { diagnoseSalesDrop } from "./knowledge/sales-drop";
 import { planSupply, supplyPlanCsv } from "./knowledge/supply-plan";
 import { detectPatterns } from "./knowledge/patterns";
+import { evaluate, followUps, recordRecommendation, type JournalEntry } from "./knowledge/journal";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import ozon from "./integrations/ozon/client";
 import { getProductsDetailed } from "./integrations/ozon/products";
 import type { ToolResult, ToolRunner } from "./knowledge/types";
@@ -366,6 +370,16 @@ async function main() {
     )
   );
 
+  // Реклама, упавшая вслед за дефицитом, — следствие, а не вторая причина.
+  const niacDrop = await diagnoseSalesDrop("AVL-SER-NIAC-30", 7);
+  results.push(
+    assert(
+      "drop: реклама упала из-за нулевого остатка — не записывается в причины",
+      niacDrop.primary?.id === "stock" && !niacDrop.others.some((c) => c.id === "ads"),
+      { primary: niacDrop.primary?.id, others: niacDrop.others.map((c) => c.id) }
+    )
+  );
+
   const control = await diagnoseSalesDrop("ORT-MAS-VOL-10", 7);
   results.push(
     assert(
@@ -719,6 +733,91 @@ async function main() {
       autumn.seasonal_production.map((n) => `${n.offer_id}:${n.demand_naive}/${n.stock_total}`)
     )
   );
+
+  // ── Журнал рекомендаций ──
+  // Отдельный файл журнала: тесты не трогают рабочий .data/journal.json.
+  process.env.OZON_JOURNAL_PATH = join(tmpdir(), `ozonologist-journal-eval-${process.pid}.json`);
+  rmSync(process.env.OZON_JOURNAL_PATH, { force: true });
+
+  const fu = await followUps();
+  const gel = fu.find((f) => f.entry.sku === "ORT-BRW-GEL-04");
+  const niac = fu.find((f) => f.entry.sku === "AVL-SER-NIAC-30");
+  const mat = fu.find((f) => f.entry.sku === "ORT-LIP-MAT-04");
+  results.push(
+    assert(
+      "journal: гель для бровей — отгрузили, продажи вернулись: сделано и сработало",
+      !!gel && gel.due && gel.done === true && gel.worked === true,
+      gel && { due: gel.due, done: gel.done, worked: gel.worked, summary: gel.summary }
+    ),
+    assert(
+      "journal: ниацинамид — совет не выполнен, товар всё ещё в нуле",
+      !!niac && niac.due && niac.done === false,
+      niac && { due: niac.due, done: niac.done, summary: niac.summary }
+    ),
+    assert(
+      "journal: по свежему совету срок не наступил — не судим раньше времени",
+      !!mat && !mat.due && /рано/.test(mat.summary),
+      mat?.summary
+    ),
+    assert(
+      "journal: сначала наступившие сроки, среди них — невыполненные",
+      fu[0]?.entry.sku === "AVL-SER-NIAC-30",
+      fu.map((f) => f.entry.sku)
+    )
+  );
+
+  const rec = {
+    sku: "ORT-LIP-MAT-01",
+    name: "Помада Nude",
+    kind: "position" as const,
+    action: "Проверить выдачу",
+    recheck_days: 7,
+    target_orders_week: 27,
+  };
+  const first = await recordRecommendation(rec);
+  const second = await recordRecommendation(rec);
+  results.push(
+    assert(
+      "journal: один и тот же совет по товару дважды не записывается",
+      first !== null && second === null,
+      { first: first?.id, second }
+    ),
+    assert(
+      "journal: у записи есть исходная точка — с чем сравнивать при проверке",
+      !!first && typeof first.baseline.orders_week === "number",
+      first?.baseline
+    )
+  );
+
+  // Тест цены судим по марже в день, а не по заказам.
+  const testEntry: JournalEntry = {
+    id: "t",
+    created_at: "2026-09-01",
+    recheck_at: "2026-09-15",
+    sku: "X",
+    name: "X",
+    kind: "price_test",
+    action: "Тест цены",
+    baseline: { orders_week: 14, price: 690, stock: 60, ad_spend_week: 980, margin_day: 115 },
+    target_orders_week: null,
+    test_price: 1450,
+  };
+  const later = new Date("2026-09-20");
+  const raisedOk = evaluate(testEntry, { orders_week: 5, price: 1450, stock: 50, ad_spend_week: 900, margin_day: 633 }, later);
+  const notRaised = evaluate(testEntry, { orders_week: 14, price: 690, stock: 50, ad_spend_week: 900, margin_day: 115 }, later);
+  results.push(
+    assert(
+      "journal: тест цены — заказов меньше, но маржа в день выше: сработало",
+      raisedOk.done === true && raisedOk.worked === true,
+      raisedOk
+    ),
+    assert(
+      "journal: цену так и не подняли — «не сделано», а не «не сработало»",
+      notRaised.done === false,
+      notRaised
+    )
+  );
+  rmSync(process.env.OZON_JOURNAL_PATH, { force: true });
 
   const passed = results.every(Boolean);
   console.log(

@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import { OZONOLOGIST_DOMAIN, OZONOLOGIST_VOICE } from "../agents/ozonologist";
 import type { SalesDropReport } from "./sales-drop";
 import type { SupplyPlan } from "./supply-plan";
+import type { FollowUp } from "./journal";
 import { plural } from "./ru";
 import { isMock } from "../integrations/ozon/store";
 import type { DiagnosticSession, StoreScan } from "./types";
@@ -139,6 +140,11 @@ ${RULES}
 
 Если закономерностей нет — тогда уже сгруппируй находки по типу проблемы.
 
+Если есть followups_due — по прошлым советам наступил срок проверки. Начни
+с этого, одной-двумя фразами, как сказал бы человек, пришедший утром:
+«по гелю для бровей — отгрузили, продажи вернулись; по ниацинамиду совет
+висит пятый день, товар всё ещё в нуле». Невыполненное называй прямо.
+
 ПРИМЕР
 
 Плохо (отчёт по SKU):
@@ -224,8 +230,13 @@ const k = (n: number) =>
     : `${n} ₽`;
 
 // Запасной рендер обхода: закономерности, потом то, что в них не вошло.
-export function renderScan(scan: StoreScan, detail = false): string {
+export function renderScan(scan: StoreScan, detail = false, due: FollowUp[] = []): string {
   const lines: string[] = [];
+  if (due.length) {
+    lines.push("По прошлым советам наступил срок проверки:");
+    for (const f of due) lines.push(`- ${f.entry.name}: ${f.summary}`);
+    lines.push("");
+  }
   const covered = new Set(scan.patterns.flatMap((p) => p.skus));
 
   if (scan.patterns.length) {
@@ -277,6 +288,7 @@ export async function synthesizeScan(
   scan: StoreScan,
   history: Turn[] = [],
   detail = false,
+  due: FollowUp[] = [],
 ): Promise<string> {
   if (scan.status === "data_unavailable") {
     return "Не удалось получить данные магазина — ответ был бы догадкой. Проверьте доступ к Ozon и повторите.";
@@ -312,6 +324,7 @@ export async function synthesizeScan(
         evidence: f.evidence.map((m) => ({ id: m.metric_id, value: m.value })),
       })),
     unavailable_metrics: scan.unavailable_metrics,
+    followups_due: due.map(followUpFact),
   };
 
   try {
@@ -329,7 +342,7 @@ export async function synthesizeScan(
   } catch (err) {
     // Нет ключа, упал прокси, лимит — ответ всё равно должен быть.
     fallbackNotice(err);
-    return renderScan(scan, detail);
+    return renderScan(scan, detail, due);
   }
 }
 
@@ -704,5 +717,69 @@ export async function synthesizeSupplyPlan(
   } catch (err) {
     fallbackNotice(err);
     return renderSupplyPlan(plan);
+  }
+}
+
+// ── Журнал рекомендаций ──────────────────────────────────────────────────
+
+function followUpFact(f: FollowUp) {
+  return {
+    sku: f.entry.sku,
+    name: f.entry.name,
+    advised_on: f.entry.created_at,
+    advice: f.entry.action,
+    recheck_on: f.entry.recheck_at,
+    due: f.due,
+    done: f.done, // null — по данным не видно, сделали ли
+    worked: f.worked,
+    before: f.entry.baseline,
+    target_orders_week: f.entry.target_orders_week,
+    now: f.now,
+    summary: f.summary,
+  };
+}
+
+const JOURNAL_SYSTEM = `${OZONOLOGIST_DOMAIN}
+${RULES}
+
+ЖУРНАЛ РЕКОМЕНДАЦИЙ
+
+Тебе дают прошлые советы и то, что с ними стало по данным: сделали ли (done)
+и сработало ли (worked). Расскажи это как аналитик, который отчитывается,
+чего добился:
+- сначала то, где наступил срок; невыполненное называй прямо и говори, сколько
+  совет висит — это главное, что человек должен узнать;
+- «сделано и сработало» — коротко, с цифрами до и после;
+- «сделано, но не сработало» — это результат, а не провал: гипотеза была
+  неверной, скажи, что искать дальше;
+- done = null — по цифрам не видно, сделали ли (карточку или отзывы данные
+  не показывают); так и скажи и спроси;
+- то, где срок не наступил, — одной фразой в конце.`;
+
+export function renderJournal(items: FollowUp[]): string {
+  if (!items.length) return "Журнал пуст: советов с проверкой результата ещё не было." + mockNote();
+  const lines = items.map((f) => `- ${f.entry.name} (совет от ${f.entry.created_at.slice(8, 10)}.${f.entry.created_at.slice(5, 7)}): ${f.summary}`);
+  return lines.join("\n") + mockNote();
+}
+
+export async function synthesizeJournal(items: FollowUp[], history: Turn[] = []): Promise<string> {
+  if (!items.length) return renderJournal(items);
+  try {
+    return (
+      (await complete(JOURNAL_SYSTEM, [
+        ...recent(history),
+        {
+          role: "user",
+          content: `Что с прошлыми рекомендациями?\n\nЖУРНАЛ (JSON, только отсюда бери цифры):\n${JSON.stringify(
+            items.map(followUpFact),
+            null,
+            2,
+          )}`,
+        },
+      ])) + mockNote()
+    );
+  } catch (err) {
+    fallbackNotice(err);
+    return renderJournal(items);
   }
 }

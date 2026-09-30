@@ -322,6 +322,25 @@ function checkAds(cur: DailyPoint[], prev: DailyPoint[]): CheckResult {
   const now = sum(spendNow);
   const before = sum(spendBefore);
   const delta = pct(now, before);
+  // Реклама упала, пока товара не было на складе, — это следствие дефицита
+  // (карточка без остатка не показывается), а не решение урезать бюджет.
+  const stockedOut = cur.some((d) => d.stock === 0);
+  if ((delta ?? 0) <= -40 && stockedOut) {
+    return {
+      id: "ads",
+      order: 7,
+      title: "Реклама и продвижение",
+      status: "not_confirmed",
+      data: `Расход на продвижение ${Math.round(before)} → ${Math.round(now)} ₽ (${num(delta)}%)`,
+      formula: "(расход текущего периода − предыдущего) / предыдущего × 100",
+      conclusion:
+        "Расход упал вслед за нулевым остатком: карточка без товара не показывается. Это следствие дефицита, а не причина падения.",
+      source: SOURCES.ads,
+      weight: 0,
+      action: null,
+      recheck_days: null,
+    };
+  }
   const cut = (delta ?? 0) <= -40;
 
   return {

@@ -2,11 +2,13 @@ import { NextRequest } from "next/server";
 import { matchUnits, runDiagnosis, runStoreScan } from "../../../knowledge/runtime";
 import { diagnoseSalesDrop } from "../../../knowledge/sales-drop";
 import { planSupply } from "../../../knowledge/supply-plan";
+import { followUps, recordRecommendation, type RecKind } from "../../../knowledge/journal";
 import {
   synthesize,
   synthesizeSalesDrop,
   synthesizeScan,
   synthesizeSupplyPlan,
+  synthesizeJournal,
 } from "../../../knowledge/synthesize";
 import { getProducts } from "../../../integrations/ozon/store";
 import type { DiagnosticSession, ProductRef, StoreScan } from "../../../knowledge/types";
@@ -51,6 +53,23 @@ const SUPPLY_RE =
 // цену, и отвечать на него надо правилами цены, а не восемью проверками спада.
 const DROP_RE =
   /упал|упад|падени|просел|просад|снизил|меньше заказ|хуже прода|не прода[её]тся|почему.*продаж/i;
+
+// Вопрос про прошлые советы: что советовали, сделали ли, сработало ли.
+// Узко нарочно: «какие рекомендации по стоку?» — просьба о новых советах, а
+// «сработала ли акция?» — вопрос про промо, и ни то ни другое не про журнал.
+const JOURNAL_RE =
+  /(прошл\S*|наш\S*|тво\S*|мо[иих]\S*) (совет|рекомендац)|(совет|рекомендац)\S*[^.?!]{0,30}(сработал|помогл|выполнил|сделал)|(сработал|помогл|выполнил)\S*[^.?!]{0,30}(совет|рекомендац)|что с (прошл|совет|рекомендац)|журнал|что (ты |мы )?советовал/i;
+
+// Запись совета в журнал не должна ломать ответ: не записалось — не беда,
+// ответ человек всё равно получит.
+async function remember(rec: Parameters<typeof recordRecommendation>[0]) {
+  try {
+    const e = await recordRecommendation(rec);
+    if (e) console.log(`[journal] записан совет ${e.id}, проверка ${e.recheck_at}`);
+  } catch (err) {
+    console.warn(`[journal] не записал совет: ${(err as Error).message}`);
+  }
+}
 
 // Период сравнения: «за 14 дней» → 14. По умолчанию 7 против предыдущих 7.
 function periodDays(text: string): number {
@@ -196,7 +215,10 @@ export async function POST(req: NextRequest) {
     const dialogue = (b.messages ?? []).slice(0, -1).filter((m) => m?.content);
 
     let answer: string;
-    if (SUPPLY_RE.test(question)) {
+    if (JOURNAL_RE.test(question)) {
+      // Что советовали и что из этого вышло — по данным, а не по памяти.
+      answer = await synthesizeJournal(await followUps(), dialogue);
+    } else if (SUPPLY_RE.test(question)) {
       // План поставок: что, куда и сколько везти. Назван артикул — по нему,
       // нет — по всему ассортименту.
       const plan = await planSupply(offerId ? { offerIds: [offerId] } : {});
@@ -215,6 +237,20 @@ export async function POST(req: NextRequest) {
       });
       logDiagnosticSession(session);
       answer = await synthesize(session, dialogue);
+      // Совет поднять цену — это тест; через две недели проверим маржу в день.
+      const rule = session.diagnosis?.matched_rule ?? "";
+      if (session.intent.unit_id === "pricing.price-too-low" && rule.startsWith("underpriced")) {
+        const low = session.metrics.find((m) => m.metric_id === "market_low_price")?.value;
+        await remember({
+          sku: offerId,
+          name: (await getProducts()).find((p) => p.offer_id === offerId)?.name ?? offerId,
+          kind: "price_test",
+          action: `Тест цены: поднять до ${typeof low === "number" ? low : "нижней границы ниши"} ₽ на две недели`,
+          recheck_days: 14,
+          target_orders_week: null,
+          test_price: typeof low === "number" ? low : null,
+        });
+      }
     } else if (offerId) {
       // Назван конкретный SKU — режим «Диагностика падения продаж»:
       // восемь проверок по порядку, каждую делает код.
@@ -236,6 +272,18 @@ export async function POST(req: NextRequest) {
       // Предыдущие реплики уходят в синтез: «а почему?» должно читаться как
       // продолжение разговора. Цифры модель всё равно берёт только из отчёта.
       answer = await synthesizeSalesDrop(report, detail, dialogue);
+      // Найдена причина — запоминаем совет, чтобы в срок проверить, помог ли.
+      if (report.is_drop && report.primary && report.drop) {
+        await remember({
+          sku: report.offer_id,
+          name: report.name,
+          kind: report.primary.id as RecKind,
+          action: report.primary.action ?? report.primary.conclusion,
+          recheck_days: report.primary.recheck_days ?? 7,
+          // Цель — вернуться к уровню до падения, в пересчёте на неделю.
+          target_orders_week: Math.round((report.drop.orders_before * 7) / report.period_days),
+        });
+      }
     } else if (productRef) {
       const session = await runDiagnosis({ question, productRef });
       logDiagnosticSession(session);
@@ -246,7 +294,9 @@ export async function POST(req: NextRequest) {
     } else {
       const scan = await runStoreScan({ question });
       logStoreScan(scan);
-      answer = await synthesizeScan(scan, dialogue, detail);
+      // Утренний обход начинается с того, по чему наступил срок проверки.
+      const due = (await followUps()).filter((f) => f.due);
+      answer = await synthesizeScan(scan, dialogue, detail, due);
     }
 
     return new Response(answer, {

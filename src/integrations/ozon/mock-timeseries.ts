@@ -25,7 +25,7 @@ export interface DailyPoint {
 // Сценарий, который «сломал» продажи конкретного SKU. Дни отрицательные:
 // -5 = пять дней назад. Так проверки находят не просто спад, а его причину.
 type Anomaly =
-  | { kind: "stockout"; fromDay: number }
+  | { kind: "stockout"; fromDay: number; toDay?: number }
   | { kind: "price_up"; fromDay: number; pct: number }
   | { kind: "position_drop"; fromDay: number; to: number }
   | { kind: "rating_drop"; fromDay: number; negativePerDay: number }
@@ -46,6 +46,9 @@ const ANOMALIES: Record<string, Anomaly> = {
   "ORT-BLS-PWD-05": { kind: "rating_drop", fromDay: -9, negativePerDay: 2 },
   // Срезали бюджет продвижения — ушёл платный трафик.
   "AVL-CRM-DAY-50": { kind: "ad_cut", fromDay: -7 },
+  // Был в нуле с 15-го по 9-й день назад, потом отгрузили — продажи вернулись.
+  // Нужен журналу рекомендаций: история, где совет выполнили и он сработал.
+  "ORT-BRW-GEL-04": { kind: "stockout", fromDay: -16, toDay: -9 },
   // Падение без видимой причины: у нас не менялось ничего. Ходовой товар,
   // чтобы падение было заметно больше шума (на 10 заказах в неделю минус
   // три заказа — это колебание, а не сигнал).
@@ -85,7 +88,9 @@ export function dailySeries(p: OzonProduct, days = 28): DailyPoint[] {
   for (let d = 0; d > -days; d--) {
     const active = anomaly && d <= anomaly.fromDay ? false : true;
     // «active» = день ДО поломки. Дни после fromDay (ближе к сегодня) — сломанные.
-    const broken = anomaly ? d > anomaly.fromDay : false;
+    // Поломка длится с fromDay до toDay (или до сегодня, если toDay не задан).
+    const until = anomaly && "toDay" in anomaly && anomaly.toDay !== undefined ? anomaly.toDay : 0;
+    const broken = anomaly ? d > anomaly.fromDay && d <= until : false;
     void active;
 
     let price = p.price;
@@ -100,6 +105,11 @@ export function dailySeries(p: OzonProduct, days = 28): DailyPoint[] {
       switch (anomaly.kind) {
         case "stockout":
           ordersFactor = 0;
+          // Карточка без остатка пропадает из выдачи — продвижение не крутится
+          // и почти ничего не тратит. Раньше мок продолжал «тратить» бюджет,
+          // и агент честно пересказывал нереалистичную картину.
+          adSpend = 0;
+          adOrders = 0;
           break;
         case "price_up":
           // Цену подняли: до поломки была ниже текущей.
@@ -138,7 +148,9 @@ export function dailySeries(p: OzonProduct, days = 28): DailyPoint[] {
       orders,
       revenue: orders * price,
       sessions,
-      stock: Math.max(0, Math.round(stockCursor)),
+      // В дни дефицита остаток ноль — тот же признак broken, что и у заказов,
+      // иначе на границах выходили «продажи при нулевом остатке».
+      stock: anomaly?.kind === "stockout" && broken ? 0 : Math.max(0, Math.round(stockCursor)),
       price,
       position,
       ad_spend: adSpend === null ? null : Math.round(adSpend),
@@ -150,14 +162,6 @@ export function dailySeries(p: OzonProduct, days = 28): DailyPoint[] {
 
     // Идём назад: вчера на складе было столько же плюс то, что сегодня продали.
     stockCursor += orders;
-  }
-
-  // Для stockout остаток в «сломанные» дни должен быть нулём, а не восстановленным.
-  if (anomaly?.kind === "stockout") {
-    for (const point of backwards) {
-      const offset = Math.round((Date.parse(point.date) - Date.now()) / DAY);
-      if (offset > anomaly.fromDay) point.stock = 0;
-    }
   }
 
   return backwards.reverse(); // от старых дней к сегодняшнему
