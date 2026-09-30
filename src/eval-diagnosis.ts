@@ -350,6 +350,22 @@ async function main() {
     )
   );
 
+  // Падение без видимой причины: всё своё в порядке, не проверены конкуренты.
+  // Агент не должен назначать причину, но должен назвать непроверенное.
+  const unexplained = await diagnoseSalesDrop("ORT-LIP-MAT-01", 7);
+  results.push(
+    assert(
+      "drop: падение без причины в данных — причина не назначается",
+      unexplained.is_drop && unexplained.primary === null && unexplained.others.length === 0,
+      { is_drop: unexplained.is_drop, primary: unexplained.primary?.id }
+    ),
+    assert(
+      "drop: непроверенное (конкуренты) названо, а не спрятано",
+      unexplained.no_data.some((c) => c.id === "competitors"),
+      unexplained.no_data.map((c) => c.id)
+    )
+  );
+
   const control = await diagnoseSalesDrop("ORT-MAS-VOL-10", 7);
   results.push(
     assert(

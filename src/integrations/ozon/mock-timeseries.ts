@@ -29,7 +29,11 @@ type Anomaly =
   | { kind: "price_up"; fromDay: number; pct: number }
   | { kind: "position_drop"; fromDay: number; to: number }
   | { kind: "rating_drop"; fromDay: number; negativePerDay: number }
-  | { kind: "ad_cut"; fromDay: number };
+  | { kind: "ad_cut"; fromDay: number }
+  // Спрос упал, а у нас ничего не менялось: цена, остаток, выдача, отзывы,
+  // реклама — всё прежнее. В жизни это чаще всего конкурент с акцией или
+  // сезон, и без внешних данных (MPSTATS) этого не видно.
+  | { kind: "market"; fromDay: number };
 
 const ANOMALIES: Record<string, Anomaly> = {
   // Товар кончился — продажи обнулились вместе с остатком.
@@ -42,6 +46,10 @@ const ANOMALIES: Record<string, Anomaly> = {
   "ORT-BLS-PWD-05": { kind: "rating_drop", fromDay: -9, negativePerDay: 2 },
   // Срезали бюджет продвижения — ушёл платный трафик.
   "AVL-CRM-DAY-50": { kind: "ad_cut", fromDay: -7 },
+  // Падение без видимой причины: у нас не менялось ничего. Ходовой товар,
+  // чтобы падение было заметно больше шума (на 10 заказах в неделю минус
+  // три заказа — это колебание, а не сигнал).
+  "ORT-LIP-MAT-01": { kind: "market", fromDay: -6 },
 };
 
 // mulberry32: короткий детерминированный PRNG. Нужен именно воспроизводимый
@@ -109,6 +117,9 @@ export function dailySeries(p: OzonProduct, days = 28): DailyPoint[] {
         case "ad_cut":
           adSpend = 0;
           adOrders = 0;
+          ordersFactor = 0.5;
+          break;
+        case "market":
           ordersFactor = 0.5;
           break;
       }

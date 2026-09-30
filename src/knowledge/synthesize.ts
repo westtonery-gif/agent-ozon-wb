@@ -7,6 +7,7 @@ import { OZONOLOGIST_DOMAIN, OZONOLOGIST_VOICE } from "../agents/ozonologist";
 import type { SalesDropReport } from "./sales-drop";
 import type { SupplyPlan } from "./supply-plan";
 import { plural } from "./ru";
+import { isMock } from "../integrations/ozon/store";
 import type { DiagnosticSession, StoreScan } from "./types";
 
 // ── Кто пишет ответ ──────────────────────────────────────────────────────
@@ -67,6 +68,13 @@ async function complete(system: string, messages: Turn[]): Promise<string> {
   throw new Error("нет ключа ни Anthropic, ни OpenAI");
 }
 
+// Пометка о тестовых данных ставится кодом, одной строкой и только в
+// мок-режиме. Модель о ней не знает — иначе каждый ответ заканчивался бы
+// проповедью «учтите, данные тестовые, сверьте с кабинетом».
+function mockNote(): string {
+  return isMock() ? "\n\n_Данные тестовые._" : "";
+}
+
 // Модель недоступна — отвечаем детерминированно, но причину пишем в лог
 // сервера. Иначе неверный ключ выглядел бы как «агент стал глупым».
 function fallbackNotice(err: unknown) {
@@ -83,6 +91,10 @@ const RULES = `
   Вывод движка — граница твоих утверждений.
 - Метрика со статусом unknown или unavailable — это «нет данных», а не ноль.
   Так и говори, и называй, что нужно подключить.
+- Обратное тоже верно: ноль в отчёте — это измеренный ноль. Движок никогда не
+  подставляет ноль вместо отсутствующих данных, для этого есть «нет данных».
+  Поле source описывает, откуда цифра приходит в живом режиме, а не то,
+  есть ли она сейчас.
 - Рекомендация — это действие: какой SKU, что сделать, к какому сроку.
   Не «оптимизировать», не «поработать над карточкой», не «рассмотреть возможность».
 - Русский язык.
@@ -218,8 +230,7 @@ export function renderScan(scan: StoreScan, detail = false): string {
       `Проверил ${scan.products_scanned} SKU — отклонений, требующих действия, нет.`,
     );
   }
-  lines.push("", "_Данные тестовые._");
-  return lines.join("\n");
+  return lines.join("\n") + mockNote();
 }
 
 export async function synthesizeScan(
@@ -264,7 +275,7 @@ export async function synthesizeScan(
   };
 
   try {
-    return await complete(SCAN_SYSTEM, [
+    return (await complete(SCAN_SYSTEM, [
       ...recent(history),
       {
         role: "user",
@@ -274,7 +285,7 @@ export async function synthesizeScan(
           2,
         )}`,
       },
-    ]);
+    ])) + mockNote();
   } catch (err) {
     // Нет ключа, упал прокси, лимит — ответ всё равно должен быть.
     fallbackNotice(err);
@@ -296,6 +307,19 @@ ${RULES}
 
 Причина вероятная, а не доказанная: ранжирование — это сила сигнала, а не
 измеренный вклад. Не пиши «именно из-за этого».
+
+Если падение есть, а причина не найдена (primary = null) — это не провал
+анализа, а результат, и сказать его надо так же прямо:
+- одной фразой — что исключено (ruled_out): это сужает поиск;
+- непроверенное (not_checked) назови прямо и объясни, почему данных нет:
+  когда всё внутреннее в порядке, именно там самый вероятный ответ. Это
+  не причина, а то, что надо проверить руками, — так и говори;
+- можно назвать, что обычно стоит за падением при неизменной цене и стоке
+  (конкурент с акцией, сезон, изменение выдачи) — явно как непроверенное,
+  без цифр;
+- если объём маленький и падение на несколько штук — скажи, что это может
+  быть обычное колебание, и предложи посмотреть следующую неделю.
+Не спрашивай «сказать, какая проверка?» — если это важно, говори сразу.
 
 Если падения нет (is_drop = false) — не называй никакой причины. Скажи, что
 всё в порядке, и, если проверки что-то нашли, подай это как замечание по
@@ -395,8 +419,16 @@ export function renderSalesDrop(r: SalesDropReport, detail = false): string {
     if (r.primary.action) lines.push(`${r.primary.action}${tail}`);
     else if (tail) lines.push(tail.trim());
   } else {
+    const ruledOut = r.checks
+      .filter((c) => c.status === "not_confirmed" && c.id !== "sales")
+      .map((c) => c.title.toLowerCase());
     lines.push(
-      "Ни одна из восьми проверок причину не подтвердила — падение есть, а объяснения в данных нет.",
+      `Внутри кабинета причины нет: ${ruledOut.join(", ")} — в порядке.` +
+        (r.no_data.length
+          ? ` Не проверено: ${r.no_data
+              .map((c) => `${c.title.toLowerCase()} (${c.source})`)
+              .join("; ")}. Когда всё своё в порядке, чаще всего дело там — например, акция у конкурента; это надо посмотреть руками.`
+          : ""),
     );
   }
 
@@ -436,8 +468,7 @@ export function renderSalesDrop(r: SalesDropReport, detail = false): string {
     if (tail.length) lines.push(`Там ещё ${tail.join(" и ")} — сказать?`);
   }
 
-  if (r.is_mock) lines.push("_Данные тестовые._");
-  return lines.join("\n");
+  return lines.join("\n") + mockNote();
 }
 
 // Предыдущие реплики диалога. Нужны, чтобы «а почему?» и «что со вторым?»
@@ -474,13 +505,18 @@ export async function synthesizeSalesDrop(
     drop: r.drop,
     primary: r.primary,
     others_count: r.others.length,
-    no_data_count: r.no_data.length,
+    // Что проверено и не подтвердилось, и что проверить было нечем. Когда
+    // причина не найдена, это главное содержание ответа: исключённое сужает
+    // поиск, а непроверенное — первый подозреваемый.
+    ruled_out: r.checks
+      .filter((c) => c.status === "not_confirmed" && c.id !== "sales")
+      .map((c) => c.title),
+    not_checked: r.no_data.map((c) => ({ check: c.title, why: c.source })),
     checks: detail ? r.checks : undefined,
-    data_is_mock: r.is_mock,
   };
 
   try {
-    return await complete(DROP_SYSTEM, [
+    return (await complete(DROP_SYSTEM, [
       ...recent(history),
       {
         role: "user",
@@ -494,7 +530,7 @@ export async function synthesizeSalesDrop(
           2,
         )}`,
       },
-    ]);
+    ])) + mockNote();
   } catch (err) {
     // Ключа нет, прокси упал, лимит — ответ всё равно должен быть.
     fallbackNotice(err);
@@ -567,8 +603,7 @@ export function renderSupplyPlan(plan: SupplyPlan): string {
     );
   }
   lines.push("[Скачать запрос на отгрузку (CSV)](/api/supply-plan)");
-  if (plan.is_mock) lines.push("_Данные тестовые._");
-  return lines.join("\n");
+  return lines.join("\n") + mockNote();
 }
 
 export async function synthesizeSupplyPlan(
@@ -596,7 +631,6 @@ export async function synthesizeSupplyPlan(
       })),
     production: plan.production,
     skipped_low_demand: plan.skipped_low_demand,
-    data_is_mock: plan.is_mock,
   };
 
   try {
@@ -608,7 +642,7 @@ export async function synthesizeSupplyPlan(
       },
     ]);
     // Ссылку на файл добавляем сами: модель не должна её выдумывать или терять.
-    return `${text}\n\n[Скачать запрос на отгрузку (CSV)](/api/supply-plan)`;
+    return `${text}\n\n[Скачать запрос на отгрузку (CSV)](/api/supply-plan)` + mockNote();
   } catch (err) {
     fallbackNotice(err);
     return renderSupplyPlan(plan);
