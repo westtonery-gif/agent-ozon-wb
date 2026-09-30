@@ -2,7 +2,8 @@ import ozon from "./client";
 import { getOrdersBySku } from "./analytics";
 import type { OzonProduct } from "./mock";
 
-// Сырой список товаров: только product_id и offer_id.
+// Сырой список товаров: одна страница, только product_id и offer_id.
+// Для отладки (npm run test:ozon). Приложение использует getAllProductItems.
 export async function getProducts() {
   const response = await ozon.post("/v3/product/list", {
     filter: {},
@@ -16,6 +17,49 @@ export async function getProducts() {
 interface ProductListItem {
   product_id: number;
   offer_id: string;
+}
+
+// Размер страницы и пачки по документации Seller API: список отдаётся по
+// last_id до 1000 за раз, подробности принимают до 1000 артикулов за запрос.
+// На живом тарифе не проверено — ключей нет.
+const PAGE = 1000;
+
+// Весь ассортимент, а не первая страница. Раньше здесь был один запрос на
+// 100 товаров: на кабинете в 3000 SKU агент молча смотрел бы на первые 100 и
+// выдавал выводы так, будто видел всё. Это хуже, чем ошибка, — это уверенно
+// неполный ответ.
+export async function getAllProductItems(): Promise<ProductListItem[]> {
+  const all: ProductListItem[] = [];
+  let lastId = "";
+  // Предохранитель от бесконечного цикла, если API вернёт тот же last_id.
+  for (let page = 0; page < 100; page++) {
+    const response = await ozon.post("/v3/product/list", {
+      filter: {},
+      last_id: lastId,
+      limit: PAGE,
+    });
+    const result = response.data?.result;
+    const items: ProductListItem[] = result?.items ?? [];
+    all.push(...items);
+    const next: string = result?.last_id ?? "";
+    if (items.length < PAGE || !next || next === lastId) break;
+    lastId = next;
+  }
+  return all;
+}
+
+async function getInfoItems(offerIds: string[]): Promise<ProductInfoItem[]> {
+  const out: ProductInfoItem[] = [];
+  for (let i = 0; i < offerIds.length; i += PAGE) {
+    const info = await ozon.post("/v3/product/info/list", {
+      offer_id: offerIds.slice(i, i + PAGE),
+      product_id: [],
+      sku: [],
+    });
+    // Детали приходят в data.items (без обёртки result).
+    out.push(...((info?.data?.items as ProductInfoItem[] | undefined) ?? []));
+  }
+  return out;
 }
 
 interface ProductInfoStock {
@@ -40,21 +84,11 @@ interface ProductInfoItem {
 // Реальные товары с деталями, приведённые к формату OzonProduct.
 // Ozon отдаёт список и подробности разными эндпоинтами, поэтому делаем два запроса.
 export async function getProductsDetailed(): Promise<OzonProduct[]> {
-  const list = await getProducts();
-  const items: ProductListItem[] = list?.result?.items ?? [];
-
+  const items = await getAllProductItems();
   if (items.length === 0) return [];
 
   const offerIds = items.map((i) => i.offer_id).filter(Boolean);
-
-  const info = await ozon.post("/v3/product/info/list", {
-    offer_id: offerIds,
-    product_id: [],
-    sku: [],
-  });
-
-  // Детали приходят в data.items (без обёртки result).
-  const infoItems: ProductInfoItem[] = info?.data?.items ?? [];
+  const infoItems = await getInfoItems(offerIds);
 
   // Заказы за 30 дней по каждому SKU из аналитики. Если аналитика недоступна
   // (лимит/нет подписки) — не роняем товары, но помечаем заказы как неизвестные.

@@ -112,25 +112,34 @@ export async function getOrdersBySku(
   const dateFrom = new Date();
   dateFrom.setDate(dateFrom.getDate() - periodDays);
 
-  const response = await ozon.post("/v1/analytics/data", {
-    date_from: isoDate(dateFrom),
-    date_to: isoDate(dateTo),
-    metrics: ["ordered_units"],
-    dimension: ["sku"],
-    filters: [],
-    sort: [],
-    limit: 1000,
-    offset: 0,
-  });
-
-  const data = response.data as SkuAnalyticsResponse;
-  const rows = data.result?.data ?? [];
+  // По страницам: одна страница — 1000 строк, то есть 1000 SKU. Раньше запрос
+  // был один, и на кабинете в 3000 SKU у двух третей товаров заказы стали бы
+  // нулём (их просто нет в ответе) — агент сказал бы «не продаётся» про товар,
+  // который продаётся. Ложный вывод хуже пропуска.
+  // Лимит аналитики — около запроса в минуту, поэтому большой кабинет
+  // собирается несколько минут; результат кэшируется (CACHE_TTL_MS).
+  const LIMIT = 1000;
   const map: Record<string, number> = {};
-  for (const row of rows) {
-    // dimensions[0].id — это SKU товара, metrics[0] — заказано штук.
-    const sku = String(row.dimensions?.[0]?.id ?? "");
-    const units = Number(row.metrics?.[0] ?? 0);
-    if (sku) map[sku] = units;
+  for (let offset = 0; offset < LIMIT * 50; offset += LIMIT) {
+    const response = await ozon.post("/v1/analytics/data", {
+      date_from: isoDate(dateFrom),
+      date_to: isoDate(dateTo),
+      metrics: ["ordered_units"],
+      dimension: ["sku"],
+      filters: [],
+      sort: [],
+      limit: LIMIT,
+      offset,
+    });
+    const data = response.data as SkuAnalyticsResponse;
+    const rows = data.result?.data ?? [];
+    for (const row of rows) {
+      // dimensions[0].id — это SKU товара, metrics[0] — заказано штук.
+      const sku = String(row.dimensions?.[0]?.id ?? "");
+      const units = Number(row.metrics?.[0] ?? 0);
+      if (sku) map[sku] = units;
+    }
+    if (rows.length < LIMIT) break;
   }
 
   ordersCache = { at: Date.now(), periodDays, data: map };

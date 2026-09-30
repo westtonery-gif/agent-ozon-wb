@@ -4,6 +4,8 @@ import { matchUnits, runDiagnosis, runStoreScan } from "./knowledge/runtime";
 import { diagnoseSalesDrop } from "./knowledge/sales-drop";
 import { planSupply, supplyPlanCsv } from "./knowledge/supply-plan";
 import { detectPatterns } from "./knowledge/patterns";
+import ozon from "./integrations/ozon/client";
+import { getProductsDetailed } from "./integrations/ozon/products";
 import type { ToolResult, ToolRunner } from "./knowledge/types";
 
 // Строка товара в форме, которую отдаёт get_products (Tool Registry).
@@ -533,6 +535,53 @@ async function main() {
       stockScan.patterns.map((p) => p.owner)
     )
   );
+
+  // ── Большой кабинет: живой слой собирает весь ассортимент ──
+  // Регрессия: список товаров шёл одной страницей на 100, заказы — одной на
+  // 1000 строк. На 3000 SKU агент молча видел бы 100 товаров, а у остальных
+  // заказы стали бы нулём. Ozon подменён: ключей нет, проверяем постраничность.
+  {
+    const N = 2500;
+    const client = ozon as unknown as { post: unknown };
+    const original = client.post;
+    client.post = async (url: string, body: { last_id?: string; limit: number; offset: number; offer_id: string[] }) => {
+      if (url === "/v3/product/list") {
+        const start = body.last_id ? Number(body.last_id) : 0;
+        const items = Array.from({ length: Math.min(body.limit, N - start) }, (_, i) => ({
+          product_id: start + i,
+          offer_id: `SKU-${start + i}`,
+        }));
+        return { data: { result: { items, total: N, last_id: String(start + items.length) } } };
+      }
+      if (url === "/v3/product/info/list") {
+        if (body.offer_id.length > 1000) throw new Error("больше 1000 артикулов в одном запросе");
+        return {
+          data: {
+            items: body.offer_id.map((id) => ({ offer_id: id, sku: Number(id.slice(4)), price: "100" })),
+          },
+        };
+      }
+      const rows = Array.from({ length: Math.min(body.limit, N - body.offset) }, (_, i) => ({
+        dimensions: [{ id: String(body.offset + i) }],
+        metrics: [7],
+      }));
+      return { data: { result: { data: rows } } };
+    };
+    const live = await getProductsDetailed();
+    client.post = original;
+    results.push(
+      assert(
+        "scale: живой слой забирает весь ассортимент постранично (2500 из 2500)",
+        live.length === N,
+        live.length
+      ),
+      assert(
+        "scale: заказы из аналитики есть у всех SKU, а не у первой тысячи",
+        live.every((p) => p.orders_30d === 7),
+        live.filter((p) => p.orders_30d !== 7).length
+      )
+    );
+  }
 
   const passed = results.every(Boolean);
   console.log(
