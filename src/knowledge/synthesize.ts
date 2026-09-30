@@ -597,6 +597,15 @@ ${RULES}
   производства: это то, сколько регионы будут без товара;
 - товары, которые никуда не нужно везти, не перечисляй.
 
+Сезон. Поставки и производство посчитаны не по темпу последних 30 дней, а по
+прогнозу с учётом сезона (season_factor). Если seasonal_production не пуст —
+это главное в ответе, важнее срочных отгрузок: по темпу сейчас запаса хватает,
+а с учётом пика — нет, и партию надо запускать сегодня, потому что цикл
+производства не даст успеть позже. Скажи это так, как сказал бы человек:
+«по сентябрю хватило бы, но впереди декабрь». Назови цикл, пик и сколько не
+хватит. Профиль сезонности пока экспертный, а не из истории продаж прошлого
+года, — упомяни это одной фразой, без оправданий.
+
 Полный запрос на отгрузку — в файле, ссылку дадут отдельно. Не пересказывай
 весь план построчно: главное, срочное, производство.
 
@@ -615,7 +624,7 @@ ${RULES}
   с циклом 25 дней — запускать надо сегодня, иначе почти месяц без неё.`;
 
 export function renderSupplyPlan(plan: SupplyPlan): string {
-  if (!plan.lines.length && !plan.production.length) {
+  if (!plan.lines.length && !plan.production.length && !plan.seasonal_production.length) {
     return plan.no_data.length
       ? `Для плана не хватает данных по ${plan.no_data.length} товарам — нужны остатки по складам и собственный склад.`
       : `Везти ничего не нужно: во всех кластерах запаса хватает на ${plan.target_days} дней с учётом дороги.`;
@@ -642,6 +651,13 @@ export function renderSupplyPlan(plan: SupplyPlan): string {
           : "."),
     );
   }
+  for (const n of plan.seasonal_production) {
+    lines.push(
+      `${n.name}: по темпу последних 30 дней запаса хватает (${n.demand_naive} шт на ${n.horizon_days} дн., есть ${n.stock_total}), ` +
+        `но впереди ${n.peak_month} — с учётом сезона нужно ${n.demand_seasonal}. Не хватит ${n.shortfall} шт; ` +
+        `цикл производства ${n.lead_days} дн., партию надо запускать сейчас. Профиль сезонности — экспертная оценка, не история продаж.`,
+    );
+  }
   lines.push("[Скачать запрос на отгрузку (CSV)](/api/supply-plan)");
   return lines.join("\n") + mockNote();
 }
@@ -650,7 +666,7 @@ export async function synthesizeSupplyPlan(
   plan: SupplyPlan,
   history: Turn[] = [],
 ): Promise<string> {
-  if (!plan.lines.length && !plan.production.length)
+  if (!plan.lines.length && !plan.production.length && !plan.seasonal_production.length)
     return renderSupplyPlan(plan);
 
   const facts = {
@@ -668,8 +684,10 @@ export async function synthesizeSupplyPlan(
         stock_now: l.stock_now,
         days_left: l.days_left,
         transit_days: l.transit_days,
+        season_factor: l.season_factor,
       })),
     production: plan.production,
+    seasonal_production: plan.seasonal_production,
     skipped_low_demand: plan.skipped_low_demand,
   };
 

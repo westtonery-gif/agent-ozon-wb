@@ -9,6 +9,7 @@
 // кончится раньше, чем приедет следующая поставка.
 
 import { getProducts, getSupplyInputs, isMock } from "../integrations/ozon/store";
+import { peakMonth, profileFor, seasonFactor } from "./seasonality";
 
 export interface SupplyLine {
   cluster_id: string;
@@ -17,7 +18,8 @@ export interface SupplyLine {
   name: string;
   qty: number; // к отгрузке, шт (целыми коробами)
   boxes: number;
-  daily_demand: number; // заказов в день в этом кластере
+  daily_demand: number; // прогноз заказов в день в этом кластере, с учётом сезона
+  season_factor: number; // во сколько раз прогнозный спрос отличается от последних 30 дней
   stock_now: number; // лежит в кластере сейчас
   days_left: number | null; // на сколько дней хватит; null — спроса нет
   transit_days: number;
@@ -31,6 +33,22 @@ export interface ProductionNeed {
   own_stock: number; // сколько есть на своём складе
   shortfall: number; // сколько не хватило
   lead_days: number | null; // цикл производства
+}
+
+// Товар, которому по темпу последних 30 дней запаса хватает, а с учётом
+// сезона — нет. Партию надо запускать сейчас: к пику она иначе не успеет.
+export interface SeasonalProductionNeed {
+  offer_id: string;
+  name: string;
+  season_profile: string;
+  peak_month: string;
+  lead_days: number; // цикл производства и поставки
+  horizon_days: number; // на сколько вперёд смотрим: цикл + 60 дней после прихода партии
+  season_factor: number;
+  demand_naive: number; // спрос за горизонт по темпу последних 30 дней
+  demand_seasonal: number; // тот же горизонт с учётом сезона
+  stock_total: number; // на Ozon + на своём складе
+  shortfall: number; // сколько не хватит, округлено до коробов
 }
 
 export interface ClusterTotal {
@@ -48,6 +66,7 @@ export interface SupplyPlan {
   lines: SupplyLine[];
   by_cluster: ClusterTotal[];
   production: ProductionNeed[];
+  seasonal_production: SeasonalProductionNeed[];
   skipped_low_demand: number;
   no_data: string[];
   totals: { units: number; boxes: number; skus: number; clusters: number; urgent: number };
@@ -57,14 +76,26 @@ export interface SupplyPlan {
 // он пролежит полгода и съест хранение. Такой спрос закрывается из соседнего.
 const MIN_MONTHLY_ORDERS = 3;
 
-export async function planSupply(opts: { targetDays?: number; offerIds?: string[] } = {}): Promise<SupplyPlan> {
+// Горизонт планирования производства: цикл производства плюс два месяца
+// продаж после прихода партии — партия, запущенная сегодня, должна их закрыть.
+const PRODUCTION_HORIZON_AFTER_ARRIVAL = 60;
+// Сезонный рост меньше 15% тонет в шуме — не повод запускать партию раньше.
+const MIN_SEASON_UPLIFT = 1.15;
+
+export async function planSupply(
+  opts: { targetDays?: number; offerIds?: string[]; today?: Date } = {}
+): Promise<SupplyPlan> {
   const targetDays = opts.targetDays ?? 28;
+  // Дата нужна сезонности. Передаётся явно в тестах, чтобы результат не
+  // зависел от того, в каком месяце их запускают.
+  const today = opts.today ?? new Date();
   const products = (await getProducts()).filter(
     (p) => !opts.offerIds || opts.offerIds.includes(p.offer_id)
   );
 
   const lines: SupplyLine[] = [];
   const production: ProductionNeed[] = [];
+  const seasonalProduction: SeasonalProductionNeed[] = [];
   const noData: string[] = [];
   let skipped = 0;
 
@@ -77,15 +108,48 @@ export async function planSupply(opts: { targetDays?: number; offerIds?: string[
     }
 
     const dailyTotal = p.orders_30d / 30;
+    const profile = profileFor(p.offer_id, p.category);
     const candidates: SupplyLine[] = [];
 
+    // Производство к сезону. Смотрим не на темп сентября, а на то, что будет
+    // продаваться, пока партия производится и два месяца после её прихода.
+    const lead = p.supply_lead_days ?? 30;
+    const horizon = lead + PRODUCTION_HORIZON_AFTER_ARRIVAL;
+    const horizonFactor = seasonFactor(profile, today, 0, horizon);
+    const naive = dailyTotal * horizon;
+    const seasonal = naive * horizonFactor;
+    const stockTotal = p.stock + inputs.own_stock;
+    // Только то, что меняет решение: по темпу хватает, по сезону — нет.
+    // Кто не успевает и без сезона, уже виден в дефиците и подсортировке.
+    if (horizonFactor >= MIN_SEASON_UPLIFT && naive <= stockTotal && seasonal > stockTotal) {
+      seasonalProduction.push({
+        offer_id: p.offer_id,
+        name: p.name,
+        season_profile: profile.title,
+        peak_month: peakMonth(profile, today, horizon),
+        lead_days: lead,
+        horizon_days: horizon,
+        season_factor: Number(horizonFactor.toFixed(2)),
+        demand_naive: Math.round(naive),
+        demand_seasonal: Math.round(seasonal),
+        stock_total: stockTotal,
+        shortfall: Math.ceil((seasonal - stockTotal) / inputs.units_per_box) * inputs.units_per_box,
+      });
+    }
+
     for (const pos of inputs.positions) {
-      const daily = dailyTotal * pos.demand_share;
-      if (daily * 30 < MIN_MONTHLY_ORDERS) {
+      // Порог «стоит ли вообще возить» — по фактическим продажам, не по прогнозу.
+      if (dailyTotal * pos.demand_share * 30 < MIN_MONTHLY_ORDERS) {
         skipped++;
         continue;
       }
-      const need = daily * (targetDays + pos.cluster.transit_days) - pos.stock;
+      // Остаток в кластере должен закрыть дорогу и целевой запас — по спросу
+      // этих будущих дней, а не прошедших: перед декабрём парфюм уходит
+      // вдвое быстрее, чем в сентябре, а SPF осенью — медленнее.
+      const window = targetDays + pos.cluster.transit_days;
+      const sf = seasonFactor(profile, today, 0, window);
+      const daily = dailyTotal * pos.demand_share * sf;
+      const need = daily * window - pos.stock;
       if (need <= 0) continue;
 
       // Целыми коробами — только когда потребность не меньше короба. Если в
@@ -104,6 +168,7 @@ export async function planSupply(opts: { targetDays?: number; offerIds?: string[
         qty,
         boxes: Math.ceil(qty / inputs.units_per_box),
         daily_demand: Number(daily.toFixed(2)),
+        season_factor: Number(sf.toFixed(2)),
         stock_now: pos.stock,
         days_left: daysLeft,
         transit_days: pos.cluster.transit_days,
@@ -180,6 +245,7 @@ export async function planSupply(opts: { targetDays?: number; offerIds?: string[
     lines,
     by_cluster,
     production: production.sort((a, b) => b.shortfall - a.shortfall),
+    seasonal_production: seasonalProduction.sort((a, b) => b.shortfall - a.shortfall),
     skipped_low_demand: skipped,
     no_data: noData,
     totals: {

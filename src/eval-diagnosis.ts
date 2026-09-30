@@ -687,6 +687,39 @@ async function main() {
     )
   );
 
+  // ── Сезонность ──
+  // Дата фиксирована: иначе результат менялся бы в зависимости от месяца запуска.
+  const autumn = await planSupply({ today: new Date("2026-09-30") });
+  const spring = await planSupply({ today: new Date("2026-04-15") });
+  const vet = autumn.seasonal_production.find((n) => n.offer_id === "NOI-EDP-VET-50");
+  results.push(
+    assert(
+      "season: парфюм в сентябре — по темпу хватает, с учётом декабря нет; запускать сейчас",
+      !!vet && vet.demand_naive <= vet.stock_total && vet.demand_seasonal > vet.stock_total && vet.peak_month === "декабрь",
+      vet
+    ),
+    assert(
+      "season: весной парфюм к производству не рвётся — пика впереди нет",
+      !spring.seasonal_production.some((n) => n.offer_id.startsWith("NOI-")),
+      spring.seasonal_production.map((n) => n.offer_id)
+    ),
+    assert(
+      "season: SPF-крем осенью везём меньше обычного, весной — больше",
+      autumn.lines.filter((l) => l.offer_id === "AVL-CRM-DAY-50").every((l) => l.season_factor < 1) &&
+        spring.lines.filter((l) => l.offer_id === "AVL-CRM-DAY-50").every((l) => l.season_factor > 1) &&
+        spring.lines.some((l) => l.offer_id === "AVL-CRM-DAY-50"),
+      {
+        autumn: autumn.lines.filter((l) => l.offer_id === "AVL-CRM-DAY-50").map((l) => l.season_factor),
+        spring: spring.lines.filter((l) => l.offer_id === "AVL-CRM-DAY-50").map((l) => l.season_factor),
+      }
+    ),
+    assert(
+      "season: к производству только то, что меняет сезон (дефицитные без сезона — в других находках)",
+      autumn.seasonal_production.every((n) => n.demand_naive <= n.stock_total),
+      autumn.seasonal_production.map((n) => `${n.offer_id}:${n.demand_naive}/${n.stock_total}`)
+    )
+  );
+
   const passed = results.every(Boolean);
   console.log(
     `\n${passed ? "EVAL PASSED" : "EVAL FAILED"} (${results.filter(Boolean).length}/${results.length})`
